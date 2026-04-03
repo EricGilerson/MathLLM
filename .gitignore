@@ -9,7 +9,8 @@ venv/
 *.pt
 *.pth
 checkpoints*/
-data/
+data/*
+!data/*.py
 data_debug/
 wandb/
 .pytest_cache/

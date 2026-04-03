@@ -32,6 +32,8 @@ def main():
                         help="Path to checkpoint to resume from")
     parser.add_argument("--no-resume", action="store_true",
                         help="Disable automatic resume from the latest checkpoint")
+    parser.add_argument("--export-dir", type=str, default=None,
+                        help="Directory to save the final exported model bundle")
     budget_group = parser.add_mutually_exclusive_group()
     budget_group.add_argument("--epochs-to-run", type=int, default=None,
                               help="Number of additional epochs to run this invocation")
@@ -139,6 +141,12 @@ def main():
         logger.info(f"Final train loss: {history['train_loss'][-1]:.4f}")
     if history["eval_loss"]:
         logger.info(f"Best eval loss: {trainer.best_eval_loss:.4f}")
+
+    export_dir = Path(args.export_dir or config.training.final_model_dir)
+    config.training.final_model_dir = str(export_dir)
+    logger.info(f"Exporting final model to {export_dir}")
+    model.save_exported_model(export_dir, tokenizer)
+    logger.info(f"Final model export saved to {export_dir}")
 
 
 if __name__ == "__main__":

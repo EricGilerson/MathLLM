@@ -30,6 +30,7 @@ training:
   log_every: 10
   eval_every: 100
   checkpoint_dir: "checkpoints_debug/"
+  final_model_dir: "trained_model_debug/"
   auto_resume_latest: true
   device: "auto"
   early_stopping_patience: 3

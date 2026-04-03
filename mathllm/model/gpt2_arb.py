@@ -10,16 +10,25 @@ to the unmodified GPT-2.
 
 from __future__ import annotations
 
+import inspect
+from pathlib import Path
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
-from transformers import GPT2LMHeadModel, GPT2Tokenizer
+from transformers import GPT2Config, GPT2LMHeadModel, GPT2Tokenizer
 from transformers.cache_utils import DynamicCache
+from transformers.models.gpt2.modeling_gpt2 import GPT2Block
 
 from mathllm.arb.arb_module import ArithmeticResidualBlock
-from mathllm.config import Config
+from mathllm.config import Config, load_config, save_config
 from mathllm.model.utils import freeze_parameters
+
+
+EXPORT_STATE_FILENAME = "model_state.pt"
+EXPORT_CONFIG_FILENAME = "config.yaml"
+EXPORT_BASE_MODEL_CONFIG_DIRNAME = "base_model_config"
 
 
 class GPT2WithARB(nn.Module):
@@ -29,19 +38,30 @@ class GPT2WithARB(nn.Module):
     (extraction and injection projections) are trainable.
     """
 
-    def __init__(self, config: Config):
+    def __init__(self, config: Config, base_model: GPT2LMHeadModel | None = None):
         super().__init__()
         self.config = config
 
         # Load pretrained GPT-2 with eager attention so our manually-constructed
         # attention mask works consistently across CPU, MPS, and CUDA.
-        self.base_model = GPT2LMHeadModel.from_pretrained(
-            config.training.base_model, attn_implementation="eager"
-        )
+        if base_model is None:
+            base_model = GPT2LMHeadModel.from_pretrained(
+                config.training.base_model, attn_implementation="eager"
+            )
+        if hasattr(base_model.config, "_attn_implementation"):
+            base_model.config._attn_implementation = "eager"
+        if hasattr(base_model.config, "attn_implementation"):
+            base_model.config.attn_implementation = "eager"
+        self.base_model = base_model
         self.hidden_dim = self.base_model.config.n_embd
 
         # Freeze ALL base model parameters
         freeze_parameters(self.base_model)
+
+        # Detect GPT2Block KV-cache parameter name (renamed in transformers ~4.45)
+        block_params = inspect.signature(GPT2Block.forward).parameters
+        self._cache_kwarg = "past_key_values" if "past_key_values" in block_params else "layer_past"
+        self._has_cache_position = "cache_position" in block_params
 
         # Create ARBs at specified layer positions
         self.arb_positions = set(config.arb.layer_positions)
@@ -83,8 +103,15 @@ class GPT2WithARB(nn.Module):
         device = input_ids.device
         batch_size, seq_len = input_ids.shape
 
-        # When using cache, position IDs start after the cached prefix
-        past_len = past_key_values.get_seq_length() if past_key_values else 0
+        # Normalise cache: DynamicCache (new API) or list-of-tuples (old API)
+        use_dynamic_cache = self._cache_kwarg == "past_key_values"
+        if past_key_values is None:
+            past_len = 0
+        elif use_dynamic_cache:
+            past_len = past_key_values.get_seq_length()
+        else:
+            # Old API: list of (key, value) tuples, one per layer
+            past_len = past_key_values[0][0].size(-2) if past_key_values else 0
         cache_position = torch.arange(
             past_len, past_len + seq_len, dtype=torch.long, device=device
         )
@@ -106,17 +133,26 @@ class GPT2WithARB(nn.Module):
             extended_mask = None
 
         # Iterate through transformer blocks, inserting ARBs
+        presents = []
         for i, block in enumerate(transformer.h):
             block_kwargs = {
                 "attention_mask": extended_mask,
             }
             if use_cache:
-                block_kwargs["past_key_values"] = past_key_values
+                if use_dynamic_cache:
+                    block_kwargs[self._cache_kwarg] = past_key_values
+                    if self._has_cache_position:
+                        block_kwargs["cache_position"] = cache_position
+                else:
+                    # Old API: pass this layer's (key, value) tuple or None
+                    layer_cache = past_key_values[i] if past_key_values else None
+                    block_kwargs[self._cache_kwarg] = layer_cache
                 block_kwargs["use_cache"] = True
-                block_kwargs["cache_position"] = cache_position
 
             block_output = block(hidden_states, **block_kwargs)
             hidden_states = block_output[0]
+            if use_cache and not use_dynamic_cache:
+                presents.append(block_output[1])
 
             # Insert ARB after this layer if configured
             if i in self.arb_positions:
@@ -142,7 +178,7 @@ class GPT2WithARB(nn.Module):
 
         result: dict[str, object] = {"loss": loss, "logits": logits}
         if use_cache:
-            result["past_key_values"] = past_key_values
+            result["past_key_values"] = past_key_values if use_dynamic_cache else presents
         return result
 
     @torch.no_grad()
@@ -168,11 +204,16 @@ class GPT2WithARB(nn.Module):
         """
         self.eval()
         generated = input_ids
-        cache = DynamicCache()
+        use_dynamic_cache = self._cache_kwarg == "past_key_values"
+        cache = DynamicCache() if use_dynamic_cache else None
 
         for _ in range(max_new_tokens):
             # On first step feed full prompt; after that only the new token
-            if cache.get_seq_length() == 0:
+            cache_len = (
+                cache.get_seq_length() if use_dynamic_cache and cache
+                else (cache[0][0].size(-2) if cache else 0)
+            )
+            if cache_len == 0:
                 cur_input = generated
             else:
                 cur_input = generated[:, -1:]
@@ -208,3 +249,46 @@ class GPT2WithARB(nn.Module):
         for arb in self.arbs.values():
             params.extend(p for p in arb.parameters() if p.requires_grad)
         return params
+
+    def save_exported_model(self, output_dir: str | Path, tokenizer: GPT2Tokenizer) -> Path:
+        """Save a self-contained, inference-ready model bundle."""
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        self.base_model.config.save_pretrained(output_dir / EXPORT_BASE_MODEL_CONFIG_DIRNAME)
+        tokenizer.save_pretrained(output_dir)
+        save_config(self.config, output_dir / EXPORT_CONFIG_FILENAME)
+        torch.save(self.state_dict(), output_dir / EXPORT_STATE_FILENAME)
+        return output_dir
+
+    @classmethod
+    def from_exported_model(
+        cls,
+        output_dir: str | Path,
+        device: torch.device | str | None = None,
+    ) -> tuple[GPT2WithARB, GPT2Tokenizer, Config]:
+        """Load a model bundle produced by save_exported_model."""
+        output_dir = Path(output_dir)
+        config = load_config(output_dir / EXPORT_CONFIG_FILENAME)
+        tokenizer = GPT2Tokenizer.from_pretrained(output_dir)
+        if tokenizer.pad_token is None:
+            tokenizer.pad_token = tokenizer.eos_token
+
+        base_model_config = GPT2Config.from_pretrained(
+            output_dir / EXPORT_BASE_MODEL_CONFIG_DIRNAME
+        )
+        if hasattr(base_model_config, "_attn_implementation"):
+            base_model_config._attn_implementation = "eager"
+        if hasattr(base_model_config, "attn_implementation"):
+            base_model_config.attn_implementation = "eager"
+
+        model = cls(config, base_model=GPT2LMHeadModel(base_model_config))
+        state_dict = torch.load(
+            output_dir / EXPORT_STATE_FILENAME,
+            map_location="cpu",
+            weights_only=False,
+        )
+        model.load_state_dict(state_dict)
+        if device is not None:
+            model.to(device)
+        return model, tokenizer, config

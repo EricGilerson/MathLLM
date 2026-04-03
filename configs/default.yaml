@@ -30,6 +30,7 @@ training:
   log_every: 100
   eval_every: 1000
   checkpoint_dir: "checkpoints/"
+  final_model_dir: "trained_model/"
   auto_resume_latest: true
   device: "auto"
   early_stopping_patience: 3  # stop if eval loss doesn't improve for N evals

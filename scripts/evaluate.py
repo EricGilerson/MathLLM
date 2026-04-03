@@ -23,8 +23,11 @@ logger = logging.getLogger(__name__)
 def main():
     parser = argparse.ArgumentParser(description="Evaluate ARB-augmented GPT-2")
     parser.add_argument("--config", type=str, default="configs/default.yaml")
-    parser.add_argument("--checkpoint", type=str, default=None,
-                        help="Path to ARB checkpoint to load")
+    load_group = parser.add_mutually_exclusive_group()
+    load_group.add_argument("--model-dir", type=str, default=None,
+                            help="Path to an exported final model directory")
+    load_group.add_argument("--checkpoint", type=str, default=None,
+                            help="Path to ARB checkpoint to load")
     parser.add_argument("--output", type=str, default=None,
                         help="Path to save evaluation results as JSON")
     parser.add_argument("--eval-texts", type=str, default=None,
@@ -35,22 +38,29 @@ def main():
     device = get_device(config.training.device)
     logger.info(f"Using device: {device}")
 
-    # Load tokenizer and model
-    tokenizer = GPT2Tokenizer.from_pretrained(config.training.base_model)
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
+    if args.model_dir:
+        logger.info(f"Loading exported model from: {args.model_dir}")
+        model, tokenizer, config = GPT2WithARB.from_exported_model(
+            args.model_dir,
+            device=device,
+        )
+    else:
+        # Load tokenizer and model
+        tokenizer = GPT2Tokenizer.from_pretrained(config.training.base_model)
+        if tokenizer.pad_token is None:
+            tokenizer.pad_token = tokenizer.eos_token
 
-    logger.info(f"Loading model: {config.training.base_model}")
-    model = GPT2WithARB(config)
+        logger.info(f"Loading model: {config.training.base_model}")
+        model = GPT2WithARB(config)
 
-    # Load checkpoint if provided
-    if args.checkpoint:
-        logger.info(f"Loading checkpoint: {args.checkpoint}")
-        ckpt = torch.load(args.checkpoint, map_location=device, weights_only=False)
-        for key, state in ckpt["arb_state"].items():
-            model.arbs[key].load_state_dict(state)
+        # Load checkpoint if provided
+        if args.checkpoint:
+            logger.info(f"Loading checkpoint: {args.checkpoint}")
+            ckpt = torch.load(args.checkpoint, map_location=device, weights_only=False)
+            for key, state in ckpt["arb_state"].items():
+                model.arbs[key].load_state_dict(state)
 
-    model.to(device)
+        model.to(device)
 
     # Load eval texts for perplexity if provided
     eval_texts = None

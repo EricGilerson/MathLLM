@@ -90,8 +90,14 @@ python scripts/train.py --config configs/default.yaml --epochs-to-run 2
 # Or budget by optimizer steps instead of epochs
 python scripts/train.py --config configs/default.yaml --steps-to-run 1000
 
+# Training also exports a standalone final model bundle
+# to trained_model/ by default, or a custom path via --export-dir
+
 # Evaluate
 python scripts/evaluate.py --config configs/default.yaml
+
+# Evaluate an exported final model bundle directly
+python scripts/evaluate.py --model-dir trained_model/
 
 # Fast iteration (smaller dataset, fewer epochs)
 python scripts/train.py --config configs/debug.yaml
@@ -140,6 +146,13 @@ Checkpointing and resume behavior:
 - `checkpoints/arb_latest.pt` is refreshed on every checkpoint and auto-loaded by default on the next training run.
 - Use `--resume PATH` to force a specific checkpoint, or `--no-resume` to start fresh.
 - Use `--epochs-to-run N` or `--steps-to-run N` to train in small chunks without resetting optimizer or LR progress.
+
+Final model export:
+
+- Every training run exports the in-memory final model to `training.final_model_dir`.
+- The export bundle includes `model_state.pt`, `config.yaml`, tokenizer files, and the saved GPT-2 architecture config in `base_model_config/`.
+- Override the destination with `--export-dir PATH`.
+- Load the bundle with `python scripts/evaluate.py --model-dir trained_model/`.
 
 ## Design Decisions
 

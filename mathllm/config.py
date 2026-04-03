@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -48,6 +48,7 @@ class TrainingConfig:
     log_every: int = 100
     eval_every: int = 1000
     checkpoint_dir: str = "checkpoints/"
+    final_model_dir: str = "trained_model/"
     auto_resume_latest: bool = True
     device: str = "auto"
     early_stopping_patience: int = 3  # stop if eval loss doesn't improve for N evals
@@ -95,3 +96,11 @@ def load_config(path: str | Path | None = None) -> Config:
                 overrides = yaml.safe_load(f) or {}
             _merge_into_dataclass(config, overrides)
     return config
+
+
+def save_config(config: Config, path: str | Path) -> None:
+    """Persist a config dataclass tree as YAML."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w") as f:
+        yaml.safe_dump(asdict(config), f, sort_keys=False)

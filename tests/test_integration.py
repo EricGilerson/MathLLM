@@ -43,7 +43,7 @@ class TestModelIntegration:
         from mathllm.model.gpt2_arb import GPT2WithARB
 
         model = GPT2WithARB(config)
-        base = GPT2LMHeadModel.from_pretrained("gpt2")
+        base = GPT2LMHeadModel.from_pretrained("gpt2", attn_implementation="eager")
         base.eval()
         model.eval()
 

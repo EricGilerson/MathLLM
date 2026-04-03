@@ -32,8 +32,11 @@ class GPT2WithARB(nn.Module):
         super().__init__()
         self.config = config
 
-        # Load pretrained GPT-2
-        self.base_model = GPT2LMHeadModel.from_pretrained(config.training.base_model)
+        # Load pretrained GPT-2 with eager attention so our manually-constructed
+        # attention mask works consistently across CPU, MPS, and CUDA.
+        self.base_model = GPT2LMHeadModel.from_pretrained(
+            config.training.base_model, attn_implementation="eager"
+        )
         self.hidden_dim = self.base_model.config.n_embd
 
         # Freeze ALL base model parameters

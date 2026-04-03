@@ -14,3 +14,4 @@ data/*
 data_debug/
 wandb/
 .pytest_cache/
+CLAUDE.md

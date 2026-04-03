@@ -554,6 +554,7 @@ class ArithmeticCompute(nn.Module):
     # Full forward pass: compute all operations unconditionally
     # ------------------------------------------------------------------
 
+    @torch.compiler.disable
     def forward(
         self,
         a_circle: Tensor,

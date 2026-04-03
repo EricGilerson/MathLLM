@@ -28,14 +28,14 @@ training:
   warmup_steps: 100
   grad_clip: 1.0
   log_every: 50
-  eval_every: 100
+  eval_every: 0  # disable mid-epoch eval; end-of-epoch eval is sufficient
   checkpoint_dir: "checkpoints/"
   final_model_dir: "trained_model/"
   auto_resume_latest: true
   device: "auto"
   early_stopping_patience: 3  # stop if eval loss doesn't improve for N evals
-  max_eval_batches: 20
-  eval_batch_size: 1024
+  max_eval_batches: 5
+  eval_batch_size: 512  # match training batch_size to avoid CUDA OOM
 
 evaluation:
   num_samples_per_config: 200

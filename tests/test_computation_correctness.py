@@ -686,6 +686,78 @@ class TestEndToEndPipeline:
 
 
 # ---------------------------------------------------------------------------
+# DIVISION — comprehensive
+# ---------------------------------------------------------------------------
+
+class TestDivisionCorrectness:
+    """Verify circle-encoded exact division is correct."""
+
+    def test_identity(self, compute, encoder):
+        """a / 1 = a for various a."""
+        for a in [1, 5, 99, 12345, 999999]:
+            result = crt_result(compute, compute.circle_div(
+                encode(encoder, a), encode(encoder, 1)
+            ))
+            assert result == a, f"{a} / 1 = {result}, expected {a}"
+
+    def test_self_division(self, compute, encoder):
+        """a / a = 1 for various a."""
+        for a in [1, 2, 7, 37, 100, 12345]:
+            result = crt_result(compute, compute.circle_div(
+                encode(encoder, a), encode(encoder, a)
+            ))
+            assert result == 1, f"{a} / {a} = {result}, expected 1"
+
+    def test_known_values(self, compute, encoder):
+        """Test exact divisions with known results."""
+        cases = [
+            (12, 4, 3),
+            (56, 8, 7),
+            (144, 12, 12),
+            (100, 10, 10),
+            (1000, 25, 40),
+            (63, 9, 7),
+            (121, 11, 11),
+            (1000000, 1000, 1000),
+        ]
+        for a, b, expected in cases:
+            result = crt_result(compute, compute.circle_div(
+                encode(encoder, a), encode(encoder, b)
+            ))
+            assert result == expected, f"{a} / {b} = {result}, expected {expected}"
+
+    def test_inverse_of_multiplication(self, compute, encoder):
+        """(a * b) / b = a — division undoes multiplication."""
+        rng = random.Random(7777)
+        for _ in range(200):
+            a = rng.randint(1, 10000)
+            b = rng.randint(1, 10000)
+            product = a * b
+            if product >= P:
+                continue
+
+            prod_circle = compute.circle_mul(encode(encoder, a), encode(encoder, b))
+            result_circle = compute.circle_div(prod_circle, encode(encoder, b))
+            result = crt_result(compute, result_circle)
+            assert result == a, f"({a}*{b})/{b} = {result}, expected {a}"
+
+    def test_random_exact_divisions(self, compute, encoder):
+        """Random exact divisions: sample b, quotient, compute a = b * quotient."""
+        rng = random.Random(8888)
+        for _ in range(200):
+            b = rng.randint(1, 1000)
+            quotient = rng.randint(1, 10000)
+            a = b * quotient
+            if a >= P:
+                continue
+
+            result = crt_result(compute, compute.circle_div(
+                encode(encoder, a), encode(encoder, b)
+            ))
+            assert result == quotient, f"{a} / {b} = {result}, expected {quotient}"
+
+
+# ---------------------------------------------------------------------------
 # BATCH OPERATION TESTS
 # ---------------------------------------------------------------------------
 

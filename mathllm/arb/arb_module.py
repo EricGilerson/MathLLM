@@ -3,7 +3,7 @@
 Combines all four stages:
   1. Extract (learned) — read digit vectors from hidden state
   2. Encode (frozen) — map to RNS circle representation
-  3. Compute (frozen) — execute +, -, *, exp in parallel
+  3. Compute (frozen) — execute +, -, *, exp, / in parallel
   4. Inject (learned) — project results back into hidden state
 
 The ARB runs unconditionally on every token, like LayerNorm. Non-math tokens
@@ -35,7 +35,7 @@ class ArithmeticResidualBlock(nn.Module):
         hidden_dim: int,
         primes: tuple[int, ...] = (7, 11, 13, 17, 19, 23, 29, 31, 37),
         num_digits: int = 10,
-        num_results: int = 4,
+        num_results: int = 5,
         softmax_temperature: float = 1000.0,
         dropout: float = 0.1,
     ):
@@ -84,7 +84,7 @@ class ArithmeticResidualBlock(nn.Module):
         b_exp_circle = self.encode.encode_exponent(d_b)  # [B, S, m, 2]
 
         # Stage 3: Compute all operations in parallel
-        # Returns flattened circle encodings: [B, S, 4 * m * 2]
+        # Returns flattened circle encodings: [B, S, 5 * m * 2]
         results = self.compute(a_circle, b_circle, b_exp_circle)
 
         # Stage 4: Inject into hidden state with residual connection

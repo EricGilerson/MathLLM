@@ -109,7 +109,8 @@ def compute_crt_weights(primes: tuple[int, ...]) -> Tensor:
 
     The integer n is reconstructed as: n = (sum_i r_i * w_i) mod P
 
-    Returns: Tensor of shape [m] (float32)
+    Returns: Tensor of shape [m] (float64 — must be float64 because weights
+             can exceed 10^11, beyond float32 precision)
     """
     P = compute_product(primes)
     weights = []
@@ -117,7 +118,27 @@ def compute_crt_weights(primes: tuple[int, ...]) -> Tensor:
         M_i = P // p
         M_i_inv = mod_inverse(M_i, p)
         weights.append(M_i * M_i_inv)
-    return torch.tensor(weights, dtype=torch.float32)
+    return torch.tensor(weights, dtype=torch.float64)
+
+
+def compute_division_tables(primes: tuple[int, ...]) -> list[Tensor]:
+    """Compute frozen division lookup tables for each prime.
+
+    T_p[a, b] = (a * mod_inverse(b, p)) mod p for a in {0, ..., p-1}, b in {0, ..., p-1}.
+    For b=0 (no modular inverse), the result is 0 (sentinel value).
+
+    Returns: list of m tensors, each of shape [p_i, p_i] (float32)
+    """
+    tables = []
+    for p in primes:
+        T = torch.zeros(p, p, dtype=torch.float32)
+        for b in range(1, p):
+            b_inv = mod_inverse(b, p)
+            for a in range(p):
+                T[a, b] = (a * b_inv) % p
+        # T[:, 0] remains 0 (sentinel for division by zero)
+        tables.append(T)
+    return tables
 
 
 def compute_multiplication_tables(primes: tuple[int, ...]) -> list[Tensor]:

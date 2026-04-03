@@ -7,25 +7,41 @@ Generates three categories of training data:
 
 Multi-step examples (2-step and 3-step) train the model to compose
 operations across ARB layers, as described in the architecture.
+
+Transcendental function examples (sin, cos, tan, exp, ln, sqrt) and
+floating-point arithmetic examples train the model to compose polynomial
+evaluations and Newton-Raphson iterations across multiple ARB layers.
 """
 
 from __future__ import annotations
 
 import json
+import math
 import random
 from pathlib import Path
+from typing import Any
 
 from mathllm.config import DataConfig
 from mathllm.data.negative_examples import NegativeExampleSampler
 from mathllm.data.templates import (
     ADDITION_TEMPLATES,
+    COSINE_TEMPLATES,
     DIVISION_EXACT_TEMPLATES,
     EXPONENTIATION_TEMPLATES,
+    FLOAT_ADDITION_TEMPLATES,
+    FLOAT_DIVISION_TEMPLATES,
+    FLOAT_MULTIPLICATION_TEMPLATES,
+    FLOAT_SUBTRACTION_TEMPLATES,
+    LN_TEMPLATES,
     MULTI_STEP_2_TEMPLATES,
     MULTI_STEP_3_GENERIC_TEMPLATES,
     MULTIPLICATION_TEMPLATES,
     OP_SYMBOLS,
+    SINE_TEMPLATES,
+    SQRT_TEMPLATES,
     SUBTRACTION_TEMPLATES,
+    TAN_TEMPLATES,
+    TRANSCENDENTAL_EXP_TEMPLATES,
 )
 
 
@@ -108,6 +124,111 @@ class ArithmeticDataGenerator:
             return None
         template = self.rng.choice(DIVISION_EXACT_TEMPLATES)
         return template.format(a=a, b=b, result=quotient)
+
+    # ------------------------------------------------------------------
+    # Transcendental functions
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _fmt_float(x: float, decimals: int = 6) -> str:
+        """Format a float to a fixed number of decimal places."""
+        return f"{x:.{decimals}f}"
+
+    def _generate_sine(self) -> str | None:
+        """Generate sin(x) = result with x in [0, 2*pi]."""
+        x = self.rng.uniform(0, 2 * math.pi)
+        result = math.sin(x)
+        template = self.rng.choice(SINE_TEMPLATES)
+        return template.format(x=self._fmt_float(x), result=self._fmt_float(result))
+
+    def _generate_cosine(self) -> str | None:
+        """Generate cos(x) = result with x in [0, 2*pi]."""
+        x = self.rng.uniform(0, 2 * math.pi)
+        result = math.cos(x)
+        template = self.rng.choice(COSINE_TEMPLATES)
+        return template.format(x=self._fmt_float(x), result=self._fmt_float(result))
+
+    def _generate_tan(self) -> str | None:
+        """Generate tan(x) = result, avoiding near-singularities."""
+        # Sample from safe regions (avoid pi/2 + n*pi)
+        x = self.rng.uniform(-1.4, 1.4)  # within (-pi/2, pi/2)
+        result = math.tan(x)
+        if abs(result) > 1000:
+            return None
+        template = self.rng.choice(TAN_TEMPLATES)
+        return template.format(x=self._fmt_float(x), result=self._fmt_float(result))
+
+    def _generate_transcendental_exp(self) -> str | None:
+        """Generate exp(x) = result with x in [-5, 20]."""
+        x = self.rng.uniform(-5, 20)
+        result = math.exp(x)
+        if result > 1e9:
+            return None
+        template = self.rng.choice(TRANSCENDENTAL_EXP_TEMPLATES)
+        return template.format(x=self._fmt_float(x), result=self._fmt_float(result))
+
+    def _generate_ln(self) -> str | None:
+        """Generate ln(x) = result with x in (0, 10^6]."""
+        x = self.rng.uniform(0.01, 1_000_000)
+        result = math.log(x)
+        template = self.rng.choice(LN_TEMPLATES)
+        return template.format(x=self._fmt_float(x), result=self._fmt_float(result))
+
+    def _generate_sqrt(self) -> str | None:
+        """Generate sqrt(x) = result with x in [0, 10^6]."""
+        x = self.rng.uniform(0, 1_000_000)
+        result = math.sqrt(x)
+        template = self.rng.choice(SQRT_TEMPLATES)
+        return template.format(x=self._fmt_float(x), result=self._fmt_float(result))
+
+    # ------------------------------------------------------------------
+    # Floating-point arithmetic
+    # ------------------------------------------------------------------
+
+    def _sample_float_operands(self) -> tuple[float, float]:
+        """Sample two float operands with 1-6 decimal places."""
+        decimals = self.rng.randint(1, 6)
+        scale = 10 ** decimals
+        a = self.rng.randint(1, int(min(self.max_value, 999999) * scale)) / scale
+        b = self.rng.randint(1, int(min(self.max_value, 999999) * scale)) / scale
+        return round(a, decimals), round(b, decimals)
+
+    def _generate_float_addition(self) -> str | None:
+        a, b = self._sample_float_operands()
+        result = a + b
+        if abs(result) > self.max_value:
+            return None
+        template = self.rng.choice(FLOAT_ADDITION_TEMPLATES)
+        return template.format(a=a, b=b, result=self._fmt_float(result))
+
+    def _generate_float_subtraction(self) -> str | None:
+        a, b = self._sample_float_operands()
+        result = a - b
+        template = self.rng.choice(FLOAT_SUBTRACTION_TEMPLATES)
+        return template.format(a=a, b=b, result=self._fmt_float(result))
+
+    def _generate_float_multiplication(self) -> str | None:
+        # Smaller operands to avoid overflow
+        decimals = self.rng.randint(1, 4)
+        scale = 10 ** decimals
+        a = self.rng.randint(1, int(999 * scale)) / scale
+        b = self.rng.randint(1, int(999 * scale)) / scale
+        a, b = round(a, decimals), round(b, decimals)
+        result = a * b
+        if abs(result) > self.max_value:
+            return None
+        template = self.rng.choice(FLOAT_MULTIPLICATION_TEMPLATES)
+        return template.format(a=a, b=b, result=self._fmt_float(result))
+
+    def _generate_float_division(self) -> str | None:
+        a, b = self._sample_float_operands()
+        if b == 0:
+            return None
+        result = a / b
+        if abs(result) > self.max_value:
+            return None
+        template = self.rng.choice(FLOAT_DIVISION_TEMPLATES)
+        return template.format(a=a, b=b, result=self._fmt_float(result))
 
     # ------------------------------------------------------------------
     # Helpers for multi-step
@@ -217,6 +338,8 @@ class ArithmeticDataGenerator:
             "consecutive_add", "near_overflow_mul", "power_two",
             "small_mul", "commutative_pair", "large_sub_to_zero",
             "divide_by_one", "divide_self", "square_root_exact",
+            "sin_zero", "cos_zero", "sin_pi_half", "cos_pi",
+            "exp_zero", "ln_one", "sqrt_zero", "sqrt_one",
         ])
 
         if case_type == "zero_add":
@@ -334,6 +457,30 @@ class ArithmeticDataGenerator:
             a = self.rng.randint(1, self.max_value)
             template = self.rng.choice(DIVISION_EXACT_TEMPLATES)
             return template.format(a=a, b=a, result=1)
+        elif case_type == "sin_zero":
+            template = self.rng.choice(SINE_TEMPLATES)
+            return template.format(x="0.000000", result="0.000000")
+        elif case_type == "cos_zero":
+            template = self.rng.choice(COSINE_TEMPLATES)
+            return template.format(x="0.000000", result="1.000000")
+        elif case_type == "sin_pi_half":
+            template = self.rng.choice(SINE_TEMPLATES)
+            return template.format(x=self._fmt_float(math.pi / 2), result="1.000000")
+        elif case_type == "cos_pi":
+            template = self.rng.choice(COSINE_TEMPLATES)
+            return template.format(x=self._fmt_float(math.pi), result="-1.000000")
+        elif case_type == "exp_zero":
+            template = self.rng.choice(TRANSCENDENTAL_EXP_TEMPLATES)
+            return template.format(x="0.000000", result="1.000000")
+        elif case_type == "ln_one":
+            template = self.rng.choice(LN_TEMPLATES)
+            return template.format(x="1.000000", result="0.000000")
+        elif case_type == "sqrt_zero":
+            template = self.rng.choice(SQRT_TEMPLATES)
+            return template.format(x="0.000000", result="0.000000")
+        elif case_type == "sqrt_one":
+            template = self.rng.choice(SQRT_TEMPLATES)
+            return template.format(x="1.000000", result="1.000000")
         else:  # square_root_exact
             a = self.rng.randint(1, 31622)  # sqrt(10^9) ~ 31622
             product = a * a
@@ -346,17 +493,29 @@ class ArithmeticDataGenerator:
 
     def _generate_positive_example(self) -> str | None:
         """Generate one positive arithmetic example."""
-        # Multi-step gets 2x weight (2-step and 3-step each listed once)
+        # Multi-step gets 2x weight; transcendentals and floats each get 1x
         op = self.rng.choice([
             "add", "sub", "mul", "exp", "div",
+            "sin", "cos", "tan", "texp", "ln", "sqrt",
+            "float_add", "float_sub", "float_mul", "float_div",
             "multi_step_2", "multi_step_2", "multi_step_3",
         ])
-        generators = {
+        generators: dict[str, Any] = {
             "add": self._generate_addition,
             "sub": self._generate_subtraction,
             "mul": self._generate_multiplication,
             "exp": self._generate_exponentiation,
             "div": self._generate_exact_division,
+            "sin": self._generate_sine,
+            "cos": self._generate_cosine,
+            "tan": self._generate_tan,
+            "texp": self._generate_transcendental_exp,
+            "ln": self._generate_ln,
+            "sqrt": self._generate_sqrt,
+            "float_add": self._generate_float_addition,
+            "float_sub": self._generate_float_subtraction,
+            "float_mul": self._generate_float_multiplication,
+            "float_div": self._generate_float_division,
             "multi_step_2": self._generate_multi_step_2,
             "multi_step_3": self._generate_multi_step_3,
         }

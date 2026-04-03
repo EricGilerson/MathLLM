@@ -1,12 +1,13 @@
 """Stage 3: Frozen Arithmetic Computation.
 
-Executes addition, subtraction, multiplication, and exponentiation in parallel
-using the RNS circle encoding. All weights are frozen.
+Executes addition, subtraction, multiplication, exponentiation, and division
+in parallel using the RNS circle encoding. All weights are frozen.
 
 - Addition: complex multiplication of circle encodings (exact modular addition)
 - Subtraction: conjugate + complex multiplication (exact modular subtraction)
 - Multiplication: decode residues -> lookup table -> re-encode
 - Exponentiation: Fermat reduction + lookup table
+- Division: decode residues -> modular inverse lookup table -> re-encode
 - CRT reconstruction: dot product with frozen weights to recover integer
 - Digit decomposition: integer -> base-10 digit vector
 """
@@ -23,6 +24,7 @@ from torch import Tensor
 from mathllm.arb.constants import (
     compute_circle_templates,
     compute_crt_weights,
+    compute_division_tables,
     compute_exponentiation_tables,
     compute_multiplication_tables,
     compute_product,
@@ -30,7 +32,7 @@ from mathllm.arb.constants import (
 
 
 class ArithmeticCompute(nn.Module):
-    """Frozen computation of +, -, *, exp in RNS circle encoding."""
+    """Frozen computation of +, -, *, exp, / in RNS circle encoding."""
 
     def __init__(
         self,
@@ -67,6 +69,16 @@ class ArithmeticCompute(nn.Module):
                     onehot[a, b, t_long[a, b]] = 1.0
             self.register_buffer(f"mul_onehot_{i}", onehot)
 
+        # Division tables — same one-hot treatment as multiplication
+        div_tables = compute_division_tables(primes)
+        for i, (p, t) in enumerate(zip(primes, div_tables)):
+            t_long = t.long()
+            onehot = torch.zeros(p, p, p, dtype=torch.float32)
+            for a in range(p):
+                for b in range(p):
+                    onehot[a, b, t_long[a, b]] = 1.0
+            self.register_buffer(f"div_onehot_{i}", onehot)
+
         # Exponentiation tables — same one-hot treatment
         exp_tables = compute_exponentiation_tables(primes)
         for i, (p, t) in enumerate(zip(primes, exp_tables)):
@@ -97,6 +109,9 @@ class ArithmeticCompute(nn.Module):
 
     def _get_mul_onehot(self, i: int) -> Tensor:
         return getattr(self, f"mul_onehot_{i}")
+
+    def _get_div_onehot(self, i: int) -> Tensor:
+        return getattr(self, f"div_onehot_{i}")
 
     def _get_exp_onehot(self, i: int) -> Tensor:
         return getattr(self, f"exp_onehot_{i}")
@@ -310,6 +325,125 @@ class ArithmeticCompute(nn.Module):
         return torch.stack([cos_stack, sin_stack], dim=-1)
 
     # ------------------------------------------------------------------
+    # Division: decode -> modular inverse table lookup -> re-encode
+    # ------------------------------------------------------------------
+
+    def circle_div(self, a_circle: Tensor, b_circle: Tensor) -> Tensor:
+        """Exact modular division via residue decoding and inverse table lookup.
+
+        For each prime p_i:
+        1. Decode both operands to soft one-hot residue distributions
+        2. Outer product selects cells in the division table T[a,b] = a * b^{-1} mod p
+        3. Sum gives a soft distribution over result residues
+        4. Weighted combination of circle-encoded residues gives result
+
+        Post-correction: when b ≡ 0 mod p_i, modular inverse doesn't exist.
+        For those primes, we reconstruct the quotient from the remaining primes
+        via CRT and re-encode. This handles exact divisions where b shares a
+        factor with one of the RNS primes.
+
+        Args:
+            a_circle, b_circle: [batch, seq, m, 2]
+
+        Returns:
+            [batch, seq, m, 2] — circle encoding of (a / b) mod p_i
+        """
+        a_soft = self._decode_residues_soft(a_circle)
+        b_soft = self._decode_residues_soft(b_circle)
+
+        result_cos = []
+        result_sin = []
+        # Track probability that b ≡ 0 mod p_i for post-correction
+        b_zero_probs = []
+
+        for i, p in enumerate(self.primes):
+            outer = torch.einsum("bsi,bsj->bsij", a_soft[i], b_soft[i])
+            div_onehot = self._get_div_onehot(i)  # [p, p, p]
+            result_dist = torch.einsum("bsij,ijk->bsk", outer, div_onehot)
+
+            templates = self._get_template(i)  # [p, 2]
+            result_circle_i = torch.matmul(result_dist, templates)  # [B, S, 2]
+
+            result_cos.append(result_circle_i[..., 0])
+            result_sin.append(result_circle_i[..., 1])
+            b_zero_probs.append(b_soft[i][:, :, 0])  # prob b ≡ 0 mod p_i
+
+        cos_stack = torch.stack(result_cos, dim=-1)  # [B, S, m]
+        sin_stack = torch.stack(result_sin, dim=-1)
+        result = torch.stack([cos_stack, sin_stack], dim=-1)  # [B, S, m, 2]
+        b_zero = torch.stack(b_zero_probs, dim=-1)  # [B, S, m]
+
+        # Post-correction: if any prime has b ≡ 0, reconstruct from good primes.
+        # This is a non-differentiable correction (uses hard decode + CRT), but
+        # only activates when b shares a factor with an RNS prime.
+        needs_repair = (b_zero > 0.5).any(dim=-1)  # [B, S] — any prime poisoned?
+        if needs_repair.any():
+            result = self._repair_division_residues(result, b_zero)
+
+        return result
+
+    def _repair_division_residues(
+        self, result_circle: Tensor, b_zero_probs: Tensor,
+    ) -> Tensor:
+        """Repair division results for primes where b ≡ 0.
+
+        Uses partial CRT from the good primes to reconstruct the quotient,
+        then re-encodes the correct residue for the bad primes.
+
+        Args:
+            result_circle: [B, S, m, 2] — division result (some primes wrong)
+            b_zero_probs: [B, S, m] — probability b ≡ 0 for each prime
+
+        Returns:
+            [B, S, m, 2] — corrected result
+        """
+        from mathllm.arb.constants import compute_crt_weights, mod_inverse
+
+        B, S, m, _ = result_circle.shape
+        bad_mask = b_zero_probs > 0.5  # [B, S, m]
+
+        # Decode hard residues from the result circle
+        residues = self._decode_residues_hard(result_circle)  # [B, S, m] float32
+
+        result_out = result_circle.clone()
+
+        for bi in range(B):
+            for si in range(S):
+                bad = bad_mask[bi, si]  # [m] bool
+                if not bad.any():
+                    continue
+
+                good_indices = [j for j in range(m) if not bad[j]]
+                if len(good_indices) < 2:
+                    continue
+
+                # Partial CRT: recompute weights for just the good primes
+                good_primes = tuple(self.primes[j] for j in good_indices)
+                good_crt_weights = compute_crt_weights(good_primes)  # float64
+                good_residues = torch.tensor(
+                    [residues[bi, si, j].item() for j in good_indices],
+                    dtype=torch.float64,
+                )
+
+                good_P = 1
+                for p in good_primes:
+                    good_P *= p
+
+                n = int((good_residues * good_crt_weights).sum().item() % good_P)
+
+                # Re-encode the correct residue for each bad prime
+                for j in range(m):
+                    if not bad[j]:
+                        continue
+                    p = self.primes[j]
+                    correct_residue = n % p
+                    angle = 2.0 * math.pi * correct_residue / p
+                    result_out[bi, si, j, 0] = math.cos(angle)
+                    result_out[bi, si, j, 1] = math.sin(angle)
+
+        return result_out
+
+    # ------------------------------------------------------------------
     # CRT Reconstruction: residues -> integer
     # ------------------------------------------------------------------
 
@@ -317,18 +451,19 @@ class ArithmeticCompute(nn.Module):
         """Reconstruct integer from circle encoding via Chinese Remainder Theorem.
 
         1. Decode circle to integer residues per prime
-        2. Dot product with CRT weights
+        2. Dot product with CRT weights (in float64 for precision)
         3. Reduce mod P
 
         Args:
             circle: [batch, seq, m, 2]
 
         Returns:
-            [batch, seq] — reconstructed integers
+            [batch, seq] — reconstructed integers (float64)
         """
-        residues = self._decode_residues_hard(circle)  # [B, S, m]
-        # CRT: n = sum(r_i * w_i) mod P
-        weighted = residues * self.crt_weights  # [B, S, m]
+        residues = self._decode_residues_hard(circle)  # [B, S, m] float32
+        # CRT weights are float64; cast residues to match for exact arithmetic
+        residues_64 = residues.to(torch.float64)
+        weighted = residues_64 * self.crt_weights  # [B, S, m] float64
         n = weighted.sum(dim=-1) % self.P  # [B, S]
         return n
 
@@ -397,7 +532,7 @@ class ArithmeticCompute(nn.Module):
         b_circle: Tensor,
         b_exp_circle: Tensor,
     ) -> Tensor:
-        """Compute all four operations unconditionally in parallel.
+        """Compute all five operations unconditionally in parallel.
 
         Returns flattened circle encodings of all results, keeping the entire
         pipeline differentiable. The injection layer learns to interpret these
@@ -409,22 +544,24 @@ class ArithmeticCompute(nn.Module):
             b_exp_circle: [batch, seq, m, 2] — operand B exponent-reduced circle encoding
 
         Returns:
-            results: [batch, seq, 4 * m * 2] — flattened circle encodings
-                     of (add, sub, mul, exp) results
+            results: [batch, seq, 5 * m * 2] — flattened circle encodings
+                     of (add, sub, mul, exp, div) results
         """
         B, S = a_circle.shape[:2]
 
-        # All four operations — each returns [B, S, m, 2]
+        # All five operations — each returns [B, S, m, 2]
         add_circle = self.circle_add(a_circle, b_circle)
         sub_circle = self.circle_sub(a_circle, b_circle)
         mul_circle = self.circle_mul(a_circle, b_circle)
         exp_circle = self.circle_exp(a_circle, b_exp_circle)
+        div_circle = self.circle_div(a_circle, b_circle)
 
         # Flatten each: [B, S, m, 2] -> [B, S, m*2]
         add_flat = add_circle.reshape(B, S, -1)
         sub_flat = sub_circle.reshape(B, S, -1)
         mul_flat = mul_circle.reshape(B, S, -1)
         exp_flat = exp_circle.reshape(B, S, -1)
+        div_flat = div_circle.reshape(B, S, -1)
 
-        # Concatenate all: [B, S, 4 * m * 2]
-        return torch.cat([add_flat, sub_flat, mul_flat, exp_flat], dim=-1)
+        # Concatenate all: [B, S, 5 * m * 2]
+        return torch.cat([add_flat, sub_flat, mul_flat, exp_flat, div_flat], dim=-1)

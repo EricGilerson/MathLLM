@@ -19,7 +19,7 @@ class RNSConfig:
 class ARBConfig:
     layer_positions: tuple[int, ...] = (4, 8, 10)
     softmax_temperature: float = 1000.0
-    num_results: int = 4  # add, sub, mul, exp
+    num_results: int = 5  # add, sub, mul, exp, div
     dropout: float = 0.1  # dropout on extraction and injection layers
 
 

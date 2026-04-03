@@ -169,5 +169,16 @@ class TestArithmeticCompute:
         )
 
         results = compute(a_circle, b_circle, b_exp_circle)
-        # 4 operations * 9 primes * 2 (cos, sin) = 72
-        assert results.shape == (1, 1, 72)
+        # 5 operations * 9 primes * 2 (cos, sin) = 90
+        assert results.shape == (1, 1, 90)
+
+    def test_division(self, compute, encoder):
+        """Test exact division via modular inverse table lookup."""
+        test_cases = [(12, 4, 3), (56, 8, 7), (144, 12, 12), (347, 1, 347)]
+
+        for a, b, expected in test_cases:
+            a_circle = self._encode_number(encoder, a)
+            b_circle = self._encode_number(encoder, b)
+            result_circle = compute.circle_div(a_circle, b_circle)
+            result = compute.crt_reconstruct(result_circle)
+            assert int(result.item()) == expected, f"{a} / {b}: expected {expected}, got {int(result.item())}"

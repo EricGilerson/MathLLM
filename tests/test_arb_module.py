@@ -60,8 +60,8 @@ class TestARBModule:
         counts = arb.count_parameters()
         assert counts["learned"] > 0
         # Extraction: 2 * (768 * 10 + 10) = 15380
-        # Injection: result_dim = 4 * 9 * 2 = 72; Linear(72, 768) = 72*768 + 768 = 56064
-        expected_learned = 15380 + 56064
+        # Injection: result_dim = 5 * 9 * 2 = 90; Linear(90, 768) = 90*768 + 768 = 69888
+        expected_learned = 15380 + 69888
         assert counts["learned"] == expected_learned, \
             f"Expected {expected_learned} learned params, got {counts['learned']}"
 

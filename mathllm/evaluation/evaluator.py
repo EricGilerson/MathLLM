@@ -2,13 +2,18 @@
 
 Measures:
 1. Exact-match accuracy on N-digit arithmetic operations
-2. Ablation: zero W_proj to confirm ARB is the source of improvement
-3. Perplexity regression on language benchmarks
+2. Exact-match accuracy on exact division
+3. Approximate accuracy on transcendental functions (sin, cos, tan, exp, ln, sqrt)
+4. Approximate accuracy on floating-point arithmetic
+5. Multi-step composition accuracy
+6. Ablation: zero W_proj to confirm ARB is the source of improvement
+7. Perplexity regression on language benchmarks
 """
 
 from __future__ import annotations
 
 import logging
+import math
 import re
 from collections import defaultdict
 
@@ -22,7 +27,7 @@ from mathllm.model.gpt2_arb import GPT2WithARB
 
 logger = logging.getLogger(__name__)
 
-OP_SYMBOLS = {"add": "+", "sub": "-", "mul": "*", "exp": "**"}
+OP_SYMBOLS = {"add": "+", "sub": "-", "mul": "*", "exp": "**", "div": "/"}
 
 
 def _compute_expected(op: str, a: int, b: int) -> int | None:
@@ -41,6 +46,10 @@ def _compute_expected(op: str, a: int, b: int) -> int | None:
             return result
         except (OverflowError, ValueError):
             return None
+    elif op == "div":
+        if b == 0 or a % b != 0:
+            return None
+        return a // b
     return None
 
 
@@ -81,11 +90,22 @@ class ARBEvaluator:
         return full_text[len(prompt):]
 
     def _extract_number_from_generation(self, text: str) -> str | None:
-        """Extract the first number (possibly negative) from generated text."""
+        """Extract the first integer (possibly negative) from generated text."""
         text = text.strip()
         match = re.search(r"-?\d+", text)
         if match:
             return match.group()
+        return None
+
+    def _extract_float_from_generation(self, text: str) -> float | None:
+        """Extract the first float (possibly negative) from generated text."""
+        text = text.strip()
+        match = re.search(r"-?\d+\.?\d*", text)
+        if match:
+            try:
+                return float(match.group())
+            except ValueError:
+                return None
         return None
 
     def exact_match_accuracy(
@@ -167,6 +187,223 @@ class ARBEvaluator:
             results["exp_accuracy"] = results.pop("exp_correct", 0) / results.pop("exp_total")
 
         return results
+
+    def division_accuracy(
+        self,
+        num_samples: int | None = None,
+        seed: int = 54321,
+    ) -> dict[str, float]:
+        """Test exact-match accuracy on exact division.
+
+        Generates prompts like "120 / 4 =" where divisor evenly divides dividend.
+
+        Returns:
+            Dict with division accuracy metrics.
+        """
+        import random
+
+        rng = random.Random(seed)
+        self.model.eval()
+        self.model.to(self.device)
+
+        samples = num_samples or self.config.num_samples_per_config
+        min_d, max_d = self.config.max_digits_range
+        results: dict[str, float] = {}
+
+        for n in range(min_d, min(max_d + 1, 6)):  # up to 5-digit dividends
+            correct = 0
+            total = 0
+
+            for _ in range(samples):
+                b = rng.randint(2, 10 ** min(n, 3) - 1)
+                quotient = rng.randint(1, max(1, (10**n - 1) // max(b, 1)))
+                a = b * quotient
+                if a > 10**10:
+                    continue
+
+                prompt = f"{a} / {b} ="
+                generated = self._generate_text(
+                    prompt, max_new_tokens=len(str(quotient)) + 5
+                )
+                extracted = self._extract_number_from_generation(generated)
+                if extracted is not None and int(extracted) == quotient:
+                    correct += 1
+                total += 1
+
+            accuracy = correct / max(total, 1)
+            key = f"div_{n}digit"
+            results[key] = accuracy
+            logger.info(f"  {key}: {accuracy:.1%} ({correct}/{total})")
+
+        return results
+
+    def transcendental_accuracy(
+        self,
+        num_samples: int | None = None,
+        tolerance: float = 1e-4,
+        seed: int = 67890,
+    ) -> dict[str, float]:
+        """Test approximate accuracy on transcendental functions.
+
+        Generates prompts like "sin(1.047) =" and checks if the model
+        produces a result within tolerance of the correct value.
+
+        Returns:
+            Dict mapping function names to accuracy.
+        """
+        import random
+
+        rng = random.Random(seed)
+        self.model.eval()
+        self.model.to(self.device)
+
+        samples = num_samples or self.config.num_samples_per_config
+        results: dict[str, float] = {}
+
+        # Define functions with their domains and evaluators
+        functions = {
+            "sin": (lambda: rng.uniform(0, 2 * math.pi), math.sin),
+            "cos": (lambda: rng.uniform(0, 2 * math.pi), math.cos),
+            "tan": (lambda: rng.uniform(-1.4, 1.4), math.tan),
+            "exp": (lambda: rng.uniform(-5, 10), math.exp),
+            "ln": (lambda: rng.uniform(0.1, 1000), math.log),
+            "sqrt": (lambda: rng.uniform(0, 100000), math.sqrt),
+        }
+
+        for fname, (sampler, evaluator) in functions.items():
+            correct = 0
+            total = 0
+
+            for _ in range(samples):
+                x = sampler()
+                expected = evaluator(x)
+                if abs(expected) > 1e9:
+                    continue
+
+                x_str = f"{x:.6f}"
+                prompt = f"{fname}({x_str}) ="
+                generated = self._generate_text(prompt, max_new_tokens=20)
+                extracted = self._extract_float_from_generation(generated)
+
+                if extracted is not None:
+                    if abs(expected) < 1e-6:
+                        if abs(extracted) < tolerance:
+                            correct += 1
+                    elif abs(extracted - expected) / max(abs(expected), 1e-10) < tolerance:
+                        correct += 1
+                total += 1
+
+            accuracy = correct / max(total, 1)
+            results[f"{fname}_accuracy"] = accuracy
+            logger.info(f"  {fname}: {accuracy:.1%} ({correct}/{total})")
+
+        return results
+
+    def float_arithmetic_accuracy(
+        self,
+        num_samples: int | None = None,
+        tolerance: float = 1e-4,
+        seed: int = 11111,
+    ) -> dict[str, float]:
+        """Test approximate accuracy on floating-point arithmetic.
+
+        Returns:
+            Dict mapping operation names to accuracy.
+        """
+        import random
+
+        rng = random.Random(seed)
+        self.model.eval()
+        self.model.to(self.device)
+
+        samples = num_samples or self.config.num_samples_per_config
+        results: dict[str, float] = {}
+
+        float_ops = {
+            "float_add": ("+", lambda a, b: a + b),
+            "float_sub": ("-", lambda a, b: a - b),
+            "float_mul": ("*", lambda a, b: a * b),
+            "float_div": ("/", lambda a, b: a / b if b != 0 else None),
+        }
+
+        for op_name, (symbol, compute) in float_ops.items():
+            correct = 0
+            total = 0
+
+            for _ in range(samples):
+                a = round(rng.uniform(0.1, 1000), rng.randint(1, 4))
+                b = round(rng.uniform(0.1, 1000), rng.randint(1, 4))
+                expected = compute(a, b)
+                if expected is None or abs(expected) > 1e9:
+                    continue
+
+                prompt = f"{a} {symbol} {b} ="
+                generated = self._generate_text(prompt, max_new_tokens=20)
+                extracted = self._extract_float_from_generation(generated)
+
+                if extracted is not None:
+                    if abs(expected) < 1e-6:
+                        if abs(extracted) < tolerance:
+                            correct += 1
+                    elif abs(extracted - expected) / max(abs(expected), 1e-10) < tolerance:
+                        correct += 1
+                total += 1
+
+            accuracy = correct / max(total, 1)
+            results[f"{op_name}_accuracy"] = accuracy
+            logger.info(f"  {op_name}: {accuracy:.1%} ({correct}/{total})")
+
+        return results
+
+    def multi_step_accuracy(
+        self,
+        num_samples: int | None = None,
+        seed: int = 22222,
+    ) -> dict[str, float]:
+        """Test accuracy on multi-step arithmetic expressions.
+
+        Generates 2-step prompts like "(3 + 4) * 5 =" and checks
+        if the final result is correct.
+
+        Returns:
+            Dict with multi-step accuracy metrics.
+        """
+        import random
+
+        rng = random.Random(seed)
+        self.model.eval()
+        self.model.to(self.device)
+
+        samples = num_samples or self.config.num_samples_per_config
+        ops = ["+", "-", "*"]
+
+        correct = 0
+        total = 0
+
+        for _ in range(samples):
+            a = rng.randint(1, 99)
+            b = rng.randint(1, 99)
+            c = rng.randint(1, 99)
+            op1 = rng.choice(ops)
+            op2 = rng.choice(ops)
+
+            intermediate = eval(f"{a} {op1} {b}")
+            expected = eval(f"{intermediate} {op2} {c}")
+            if abs(expected) > 10**10:
+                continue
+
+            prompt = f"({a} {op1} {b}) {op2} {c} ="
+            generated = self._generate_text(
+                prompt, max_new_tokens=len(str(abs(expected))) + 5
+            )
+            extracted = self._extract_number_from_generation(generated)
+            if extracted is not None and int(extracted) == expected:
+                correct += 1
+            total += 1
+
+        accuracy = correct / max(total, 1)
+        logger.info(f"  multi_step_2: {accuracy:.1%} ({correct}/{total})")
+        return {"multi_step_2_accuracy": accuracy}
 
     def ablation_test(self, num_samples: int = 50, seed: int = 99) -> dict[str, float]:
         """Zero out W_proj, confirm accuracy reverts to baseline.
@@ -286,6 +523,18 @@ class ARBEvaluator:
 
         logger.info("=== Exact Match Accuracy ===")
         results["exact_match"] = self.exact_match_accuracy()
+
+        logger.info("=== Division Accuracy ===")
+        results["division"] = self.division_accuracy()
+
+        logger.info("=== Transcendental Accuracy ===")
+        results["transcendental"] = self.transcendental_accuracy()
+
+        logger.info("=== Float Arithmetic Accuracy ===")
+        results["float_arithmetic"] = self.float_arithmetic_accuracy()
+
+        logger.info("=== Multi-Step Accuracy ===")
+        results["multi_step"] = self.multi_step_accuracy()
 
         logger.info("=== Ablation Test ===")
         results["ablation"] = self.ablation_test()

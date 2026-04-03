@@ -19,21 +19,23 @@ data:
 
 training:
   base_model: "gpt2"
-  lr: 3.0e-4
+  lr: 4.8e-3
   weight_decay: 0.01
-  batch_size: 32
+  batch_size: 512
   max_epochs: 10
   checkpoint_every_steps: 0
   max_seq_len: 128
-  warmup_steps: 500
+  warmup_steps: 100
   grad_clip: 1.0
-  log_every: 100
-  eval_every: 1000
+  log_every: 50
+  eval_every: 100
   checkpoint_dir: "checkpoints/"
   final_model_dir: "trained_model/"
   auto_resume_latest: true
   device: "auto"
   early_stopping_patience: 3  # stop if eval loss doesn't improve for N evals
+  max_eval_batches: 20
+  eval_batch_size: 1024
 
 evaluation:
   num_samples_per_config: 200

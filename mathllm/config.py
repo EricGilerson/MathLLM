@@ -53,6 +53,7 @@ class TrainingConfig:
     device: str = "auto"
     early_stopping_patience: int = 3  # stop if eval loss doesn't improve for N evals
     max_eval_batches: int = 0  # cap eval batches per evaluation (0 = no cap)
+    eval_batch_size: int = 0  # eval DataLoader batch size (0 = 2x batch_size)
 
 
 @dataclass

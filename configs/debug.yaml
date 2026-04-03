@@ -34,6 +34,7 @@ training:
   auto_resume_latest: true
   device: "auto"
   early_stopping_patience: 3
+  max_eval_batches: 10
 
 evaluation:
   num_samples_per_config: 20

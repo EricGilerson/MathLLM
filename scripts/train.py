@@ -84,20 +84,25 @@ def main():
     train_ds, eval_ds = dataset.split(train_ratio=0.9)
     logger.info(f"Train: {len(train_ds)} examples, Eval: {len(eval_ds)} examples")
 
+    use_pin_memory = device.type == "cuda"
+    eval_bs = config.training.eval_batch_size or config.training.batch_size * 2
+
     train_loader = DataLoader(
-        train_ds, 
-        batch_size=config.training.batch_size, 
+        train_ds,
+        batch_size=config.training.batch_size,
         shuffle=True,
-        num_workers=2,
-        prefetch_factor=2,
-        pin_memory=(device.type != 'cpu')
+        num_workers=4,
+        prefetch_factor=4,
+        pin_memory=use_pin_memory,
+        persistent_workers=True,
     )
     eval_loader = DataLoader(
-        eval_ds, 
-        batch_size=config.training.batch_size,
-        num_workers=2,
-        prefetch_factor=2,
-        pin_memory=(device.type != 'cpu')
+        eval_ds,
+        batch_size=eval_bs,
+        num_workers=4,
+        prefetch_factor=4,
+        pin_memory=use_pin_memory,
+        persistent_workers=True,
     )
 
     # Build model
@@ -105,6 +110,11 @@ def main():
     model = GPT2WithARB(config)
     params = count_parameters(model)
     logger.info(f"Parameters — trainable: {params['trainable']:,}, frozen: {params['frozen']:,}")
+
+    # Compile forward pass for fused kernels (PyTorch 2.0+, CUDA only)
+    if device.type == "cuda" and hasattr(torch, "compile"):
+        logger.info("Compiling model forward pass with torch.compile...")
+        model.forward = torch.compile(model.forward, mode="reduce-overhead")
 
     # Create trainer
     trainer = ARBTrainer(

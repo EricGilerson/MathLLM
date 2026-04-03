@@ -380,7 +380,7 @@ class ARBTrainer:
     def _evaluate(self) -> float:
         """Evaluate on the eval set (capped by max_eval_batches if set)."""
         self.model.eval()
-        total_loss = 0.0
+        total_loss = torch.zeros(1, device=self.device)
         num_batches = 0
         max_batches = self.config.max_eval_batches or len(self.eval_loader)
 
@@ -403,12 +403,11 @@ class ARBTrainer:
                     attention_mask=batch["attention_mask"],
                     labels=batch["labels"],
                 )
-                total_loss += outputs["loss"].item()
+                total_loss += outputs["loss"].detach()
                 num_batches += 1
-                eval_bar.set_postfix(loss=f"{total_loss / num_batches:.4f}")
 
         eval_bar.close()
-        return total_loss / max(num_batches, 1)
+        return (total_loss / max(num_batches, 1)).item()
 
     def _checkpoint_payload(self) -> dict[str, object]:
         """Build the full checkpoint payload."""

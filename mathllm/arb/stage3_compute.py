@@ -47,8 +47,12 @@ class ArithmeticCompute(nn.Module):
         self.softmax_temperature = softmax_temperature
         self.P = compute_product(primes)
 
-        # CRT reconstruction weights (float64 to avoid overflow)
-        self.register_buffer("crt_weights", compute_crt_weights(primes))
+        # Keep the registered buffer MPS-safe. Exact CRT reconstruction uses a
+        # lazily materialized float64 copy off the module state.
+        crt_weights = compute_crt_weights(primes)
+        self.register_buffer("crt_weights", crt_weights.to(dtype=torch.float32))
+        self._crt_weights_fp64_cpu = crt_weights
+        self._crt_weights_fp64_cache: dict[str, Tensor] = {}
 
         # Circle templates for residue decoding
         templates = compute_circle_templates(primes)
@@ -118,6 +122,18 @@ class ArithmeticCompute(nn.Module):
 
     def _get_exp_template(self, i: int) -> Tensor:
         return getattr(self, f"exp_templates_{i}")
+
+    def _get_crt_weights_fp64(self, device: torch.device) -> Tensor:
+        """Return float64 CRT weights on a backend that supports them."""
+        if device.type in {"cpu", "mps"}:
+            return self._crt_weights_fp64_cpu
+
+        cache_key = str(device)
+        weights = self._crt_weights_fp64_cache.get(cache_key)
+        if weights is None:
+            weights = self._crt_weights_fp64_cpu.to(device=device)
+            self._crt_weights_fp64_cache[cache_key] = weights
+        return weights
 
     # ------------------------------------------------------------------
     # Addition: complex multiplication of circle encodings
@@ -458,12 +474,21 @@ class ArithmeticCompute(nn.Module):
             circle: [batch, seq, m, 2]
 
         Returns:
-            [batch, seq] — reconstructed integers (float64)
+            [batch, seq] — reconstructed integers. On MPS this is returned on
+            CPU because the exact float64 path is not supported by MPS.
         """
         residues = self._decode_residues_hard(circle)  # [B, S, m] float32
-        # CRT weights are float64; cast residues to match for exact arithmetic
-        residues_64 = residues.to(torch.float64)
-        weighted = residues_64 * self.crt_weights  # [B, S, m] float64
+
+        # Exact CRT reconstruction needs float64. MPS cannot execute float64,
+        # so perform this rare path on CPU when needed.
+        if circle.device.type == "mps":
+            residues_64 = residues.cpu().to(torch.float64)
+            weights_64 = self._get_crt_weights_fp64(torch.device("cpu"))
+        else:
+            weights_64 = self._get_crt_weights_fp64(circle.device)
+            residues_64 = residues.to(device=weights_64.device, dtype=torch.float64)
+
+        weighted = residues_64 * weights_64  # [B, S, m] float64
         n = weighted.sum(dim=-1) % self.P  # [B, S]
         return n
 

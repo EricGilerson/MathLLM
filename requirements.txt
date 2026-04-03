@@ -1,0 +1,6 @@
+torch>=2.0
+transformers>=4.35
+datasets>=2.14
+pyyaml>=6.0
+tqdm>=4.65
+pytest>=7.0

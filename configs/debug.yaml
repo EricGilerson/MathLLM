@@ -1,0 +1,36 @@
+rns:
+  primes: [7, 11, 13, 17, 19, 23, 29, 31, 37]
+  num_digit_slots: 10
+
+arb:
+  layer_positions: [4, 8, 10]
+  softmax_temperature: 100.0
+  num_results: 4
+
+data:
+  num_positive: 500
+  num_negative: 500
+  num_edge_cases: 100
+  max_digits: 5
+  max_value: 1000000000
+  seed: 42
+  output_dir: "data_debug/"
+
+training:
+  base_model: "gpt2"
+  lr: 3.0e-4
+  weight_decay: 0.01
+  batch_size: 4
+  max_epochs: 2
+  max_seq_len: 64
+  warmup_steps: 50
+  grad_clip: 1.0
+  log_every: 10
+  eval_every: 100
+  checkpoint_dir: "checkpoints_debug/"
+  device: "auto"
+
+evaluation:
+  num_samples_per_config: 20
+  max_digits_range: [1, 5]
+  max_new_tokens: 15

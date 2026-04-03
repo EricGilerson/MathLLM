@@ -1,0 +1,107 @@
+"""Arithmetic Residual Block: the complete ARB module.
+
+Combines all four stages:
+  1. Extract (learned) — read digit vectors from hidden state
+  2. Encode (frozen) — map to RNS circle representation
+  3. Compute (frozen) — execute +, -, *, exp in parallel
+  4. Inject (learned) — project results back into hidden state
+
+The ARB runs unconditionally on every token, like LayerNorm. Non-math tokens
+receive near-zero contribution because the injection projection learns to
+suppress irrelevant outputs.
+"""
+
+from __future__ import annotations
+
+import torch.nn as nn
+from torch import Tensor
+
+from mathllm.arb.stage1_extract import OperandExtractor
+from mathllm.arb.stage2_encode import RNSCircleEncoder
+from mathllm.arb.stage3_compute import ArithmeticCompute
+from mathllm.arb.stage4_inject import ResultInjector
+
+
+class ArithmeticResidualBlock(nn.Module):
+    """Complete Arithmetic Residual Block.
+
+    Learned parameters: ~47K for GPT-2 (d=768, K=10)
+    Frozen parameters: ~25K (tables, coefficient matrices, CRT weights)
+    Compute cost: negligible (~54 FLOPs for add/sub per token)
+    """
+
+    def __init__(
+        self,
+        hidden_dim: int,
+        primes: tuple[int, ...] = (7, 11, 13, 17, 19, 23, 29, 31, 37),
+        num_digits: int = 10,
+        num_results: int = 4,
+        softmax_temperature: float = 100.0,
+    ):
+        super().__init__()
+        self.hidden_dim = hidden_dim
+        self.num_digits = num_digits
+        self.num_results = num_results
+
+        # Each operation outputs m primes * 2 (cos, sin) = 2m dimensions
+        num_primes = len(primes)
+        total_result_dim = num_results * num_primes * 2
+
+        # Stage 1: Learned extraction
+        self.extract = OperandExtractor(hidden_dim, num_digits)
+
+        # Stage 2: Frozen encoding
+        self.encode = RNSCircleEncoder(primes, num_digits)
+
+        # Stage 3: Frozen computation
+        self.compute = ArithmeticCompute(primes, num_digits, softmax_temperature)
+
+        # Stage 4: Learned injection
+        self.inject = ResultInjector(hidden_dim, total_result_dim)
+
+        # Freeze stages 2 and 3
+        for param in self.encode.parameters():
+            param.requires_grad = False
+        for param in self.compute.parameters():
+            param.requires_grad = False
+
+    def forward(self, h: Tensor) -> Tensor:
+        """Run the full ARB on the hidden state.
+
+        Args:
+            h: [batch, seq_len, hidden_dim]
+
+        Returns:
+            h': [batch, seq_len, hidden_dim] — h + delta_h from arithmetic
+        """
+        # Stage 1: Extract operand digit vectors
+        d_a, d_b = self.extract(h)
+
+        # Stage 2: Encode to RNS circles
+        a_circle = self.encode(d_a)          # [B, S, m, 2]
+        b_circle = self.encode(d_b)          # [B, S, m, 2]
+        b_exp_circle = self.encode.encode_exponent(d_b)  # [B, S, m, 2]
+
+        # Stage 3: Compute all operations in parallel
+        # Returns flattened circle encodings: [B, S, 4 * m * 2]
+        results = self.compute(a_circle, b_circle, b_exp_circle)
+
+        # Stage 4: Inject into hidden state with residual connection
+        return self.inject(results, h)
+
+    def count_parameters(self) -> dict[str, int]:
+        """Count learned vs frozen parameters."""
+        learned = sum(
+            p.numel() for p in self.parameters() if p.requires_grad
+        )
+        frozen = sum(
+            p.numel() for p in self.parameters() if not p.requires_grad
+        )
+        # Also count buffers (frozen tensors registered via register_buffer)
+        buffers = sum(b.numel() for b in self.buffers())
+        return {
+            "learned": learned,
+            "frozen_params": frozen,
+            "frozen_buffers": buffers,
+            "total": learned + frozen + buffers,
+        }

@@ -1,0 +1,406 @@
+"""Stage 3: Frozen Arithmetic Computation.
+
+Executes addition, subtraction, multiplication, and exponentiation in parallel
+using the RNS circle encoding. All weights are frozen.
+
+- Addition: complex multiplication of circle encodings (exact modular addition)
+- Subtraction: conjugate + complex multiplication (exact modular subtraction)
+- Multiplication: decode residues -> lookup table -> re-encode
+- Exponentiation: Fermat reduction + lookup table
+- CRT reconstruction: dot product with frozen weights to recover integer
+- Digit decomposition: integer -> base-10 digit vector
+"""
+
+from __future__ import annotations
+
+import math
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch import Tensor
+
+from mathllm.arb.constants import (
+    compute_circle_templates,
+    compute_crt_weights,
+    compute_exponentiation_tables,
+    compute_multiplication_tables,
+    compute_product,
+)
+
+
+class ArithmeticCompute(nn.Module):
+    """Frozen computation of +, -, *, exp in RNS circle encoding."""
+
+    def __init__(
+        self,
+        primes: tuple[int, ...],
+        num_digits: int = 10,
+        softmax_temperature: float = 100.0,
+    ):
+        super().__init__()
+        self.primes = primes
+        self.num_primes = len(primes)
+        self.num_digits = num_digits
+        self.softmax_temperature = softmax_temperature
+        self.P = compute_product(primes)
+
+        # CRT reconstruction weights (float64 to avoid overflow)
+        self.register_buffer("crt_weights", compute_crt_weights(primes))
+
+        # Circle templates for residue decoding
+        templates = compute_circle_templates(primes)
+        for i, t in enumerate(templates):
+            self.register_buffer(f"templates_{i}", t)
+
+        # Multiplication tables — stored as one-hot indexed tensors
+        # For each prime p, mul_onehot[a, b, :] is a one-hot vector of length p
+        # with 1 at position (a*b) mod p. This allows soft lookup via einsum.
+        mul_tables = compute_multiplication_tables(primes)
+        for i, (p, t) in enumerate(zip(primes, mul_tables)):
+            # t: [p, p] with integer values in [0, p-1]
+            # Convert to one-hot: [p, p, p]
+            t_long = t.long()
+            onehot = torch.zeros(p, p, p, dtype=torch.float32)
+            for a in range(p):
+                for b in range(p):
+                    onehot[a, b, t_long[a, b]] = 1.0
+            self.register_buffer(f"mul_onehot_{i}", onehot)
+
+        # Exponentiation tables — same one-hot treatment
+        exp_tables = compute_exponentiation_tables(primes)
+        for i, (p, t) in enumerate(zip(primes, exp_tables)):
+            pm1 = p - 1
+            t_long = t.long()
+            onehot = torch.zeros(p, pm1, p, dtype=torch.float32)
+            for a in range(p):
+                for k in range(pm1):
+                    onehot[a, k, t_long[a, k]] = 1.0
+            self.register_buffer(f"exp_onehot_{i}", onehot)
+
+        # Precompute 2*pi/p for re-encoding results to circles
+        self.register_buffer(
+            "two_pi_over_p",
+            torch.tensor([2.0 * math.pi / p for p in primes], dtype=torch.float32),
+        )
+
+    def _get_template(self, i: int) -> Tensor:
+        return getattr(self, f"templates_{i}")
+
+    def _get_mul_onehot(self, i: int) -> Tensor:
+        return getattr(self, f"mul_onehot_{i}")
+
+    def _get_exp_onehot(self, i: int) -> Tensor:
+        return getattr(self, f"exp_onehot_{i}")
+
+    # ------------------------------------------------------------------
+    # Addition: complex multiplication of circle encodings
+    # ------------------------------------------------------------------
+
+    def circle_add(self, a_circle: Tensor, b_circle: Tensor) -> Tensor:
+        """Modular addition via complex multiplication.
+
+        (cos a + i sin a)(cos b + i sin b) = cos(a+b) + i sin(a+b)
+
+        Args:
+            a_circle, b_circle: [batch, seq, m, 2] — (cos, sin) per prime
+
+        Returns:
+            [batch, seq, m, 2] — circle encoding of (a + b) mod p_i
+        """
+        ca, sa = a_circle[..., 0], a_circle[..., 1]
+        cb, sb = b_circle[..., 0], b_circle[..., 1]
+        cos_sum = ca * cb - sa * sb
+        sin_sum = sa * cb + ca * sb
+        return torch.stack([cos_sum, sin_sum], dim=-1)
+
+    # ------------------------------------------------------------------
+    # Subtraction: conjugate second operand, then complex multiply
+    # ------------------------------------------------------------------
+
+    def circle_sub(self, a_circle: Tensor, b_circle: Tensor) -> Tensor:
+        """Modular subtraction via conjugation + complex multiplication.
+
+        a - b = a + (-b), and -b on the circle is the conjugate (negate sin).
+
+        Args:
+            a_circle, b_circle: [batch, seq, m, 2]
+
+        Returns:
+            [batch, seq, m, 2] — circle encoding of (a - b) mod p_i
+        """
+        b_conj = torch.stack([b_circle[..., 0], -b_circle[..., 1]], dim=-1)
+        return self.circle_add(a_circle, b_conj)
+
+    # ------------------------------------------------------------------
+    # Residue decoding: circle -> integer residue per prime
+    # ------------------------------------------------------------------
+
+    def _decode_residues_soft(self, circle: Tensor) -> list[Tensor]:
+        """Decode circle encodings to soft one-hot residue distributions.
+
+        For each prime p_i, computes inner product of the circle encoding with
+        p_i template vectors, then applies softmax with high temperature to get
+        a differentiable approximation to one-hot residue selection.
+
+        Args:
+            circle: [batch, seq, m, 2]
+
+        Returns:
+            List of m tensors, each [batch, seq, p_i] — soft one-hot over residues
+        """
+        soft_residues = []
+        for i, p in enumerate(self.primes):
+            c_i = circle[:, :, i, :]  # [B, S, 2]
+            templates = self._get_template(i)  # [p, 2]
+            # Inner product: [B, S, 2] @ [2, p] -> [B, S, p]
+            similarity = torch.matmul(c_i, templates.T)
+            soft = F.softmax(similarity * self.softmax_temperature, dim=-1)
+            soft_residues.append(soft)
+        return soft_residues
+
+    def _decode_residues_hard(self, circle: Tensor) -> Tensor:
+        """Decode circle encodings to integer residues (non-differentiable).
+
+        Args:
+            circle: [batch, seq, m, 2]
+
+        Returns:
+            [batch, seq, m] — integer residues per prime
+        """
+        residues = []
+        for i, p in enumerate(self.primes):
+            c_i = circle[:, :, i, :]  # [B, S, 2]
+            templates = self._get_template(i)  # [p, 2]
+            similarity = torch.matmul(c_i, templates.T)  # [B, S, p]
+            residues.append(similarity.argmax(dim=-1))  # [B, S]
+        return torch.stack(residues, dim=-1).float()  # [B, S, m]
+
+    # ------------------------------------------------------------------
+    # Multiplication: decode -> table lookup -> re-encode
+    # ------------------------------------------------------------------
+
+    def circle_mul(self, a_circle: Tensor, b_circle: Tensor) -> Tensor:
+        """Modular multiplication via residue decoding and one-hot table lookup.
+
+        For each prime p_i:
+        1. Decode both operands to soft one-hot residue distributions
+        2. Outer product selects cells in the one-hot multiplication table
+        3. Sum gives a soft distribution over result residues
+        4. Weighted combination of circle-encoded residues gives result
+
+        Args:
+            a_circle, b_circle: [batch, seq, m, 2]
+
+        Returns:
+            [batch, seq, m, 2] — circle encoding of (a * b) mod p_i
+        """
+        a_soft = self._decode_residues_soft(a_circle)
+        b_soft = self._decode_residues_soft(b_circle)
+
+        result_cos = []
+        result_sin = []
+
+        for i, p in enumerate(self.primes):
+            # Outer product of soft one-hots: [B, S, p_a, p_b]
+            outer = torch.einsum("bsi,bsj->bsij", a_soft[i], b_soft[i])
+            # One-hot table: [p, p, p] — last dim is one-hot result residue
+            mul_onehot = self._get_mul_onehot(i)  # [p, p, p]
+            # Contract outer product with table to get result distribution
+            # outer: [B, S, p, p], table: [p, p, p] -> result_dist: [B, S, p]
+            result_dist = torch.einsum("bsij,ijk->bsk", outer, mul_onehot)
+
+            # Weighted sum of circle templates to get result circle encoding
+            templates = self._get_template(i)  # [p, 2]
+            # result_dist: [B, S, p], templates: [p, 2] -> [B, S, 2]
+            result_circle_i = torch.matmul(result_dist, templates)
+
+            result_cos.append(result_circle_i[..., 0])
+            result_sin.append(result_circle_i[..., 1])
+
+        cos_stack = torch.stack(result_cos, dim=-1)  # [B, S, m]
+        sin_stack = torch.stack(result_sin, dim=-1)
+        return torch.stack([cos_stack, sin_stack], dim=-1)  # [B, S, m, 2]
+
+    # ------------------------------------------------------------------
+    # Exponentiation: Fermat reduction + table lookup
+    # ------------------------------------------------------------------
+
+    def circle_exp(
+        self, base_circle: Tensor, exp_circle: Tensor
+    ) -> Tensor:
+        """Exponentiation via Fermat's Little Theorem and table lookup.
+
+        base_circle encodes the base a (reduced mod p_i).
+        exp_circle encodes the exponent b (reduced mod (p_i - 1) by Stage 2).
+
+        For each prime p_i:
+        1. Decode base residue (mod p_i) from base_circle
+        2. Decode exponent residue (mod p_i - 1) from exp_circle
+        3. Lookup in exponentiation table T[a, k] = a^k mod p_i
+        4. Re-encode result to circle
+
+        Args:
+            base_circle: [batch, seq, m, 2] — circle encoding of base
+            exp_circle: [batch, seq, m, 2] — circle encoding of exponent (Fermat-reduced)
+
+        Returns:
+            [batch, seq, m, 2] — circle encoding of base^exp mod p_i
+        """
+        base_soft = self._decode_residues_soft(base_circle)
+
+        # Decode exponent residues — these use (p_i - 1) templates
+        exp_soft = []
+        for i, p in enumerate(self.primes):
+            e_i = exp_circle[:, :, i, :]  # [B, S, 2]
+            # Build templates for exponent: p_i - 1 evenly spaced points
+            pm1 = p - 1
+            angles = torch.arange(pm1, dtype=torch.float32, device=e_i.device)
+            angles = angles * (2.0 * math.pi / pm1)
+            exp_templates = torch.stack([torch.cos(angles), torch.sin(angles)], dim=-1)  # [pm1, 2]
+            similarity = torch.matmul(e_i, exp_templates.T)  # [B, S, pm1]
+            soft = F.softmax(similarity * self.softmax_temperature, dim=-1)
+            exp_soft.append(soft)
+
+        result_cos = []
+        result_sin = []
+
+        for i, p in enumerate(self.primes):
+            # Outer product: [B, S, p, pm1]
+            outer = torch.einsum("bsi,bsj->bsij", base_soft[i], exp_soft[i])
+            # One-hot exp table: [p, pm1, p]
+            exp_onehot = self._get_exp_onehot(i)
+            # Contract: [B, S, p, pm1] x [p, pm1, p] -> [B, S, p]
+            result_dist = torch.einsum("bsij,ijk->bsk", outer, exp_onehot)
+
+            # Weighted sum of circle templates
+            templates = self._get_template(i)  # [p, 2]
+            result_circle_i = torch.matmul(result_dist, templates)  # [B, S, 2]
+
+            result_cos.append(result_circle_i[..., 0])
+            result_sin.append(result_circle_i[..., 1])
+
+        cos_stack = torch.stack(result_cos, dim=-1)
+        sin_stack = torch.stack(result_sin, dim=-1)
+        return torch.stack([cos_stack, sin_stack], dim=-1)
+
+    # ------------------------------------------------------------------
+    # CRT Reconstruction: residues -> integer
+    # ------------------------------------------------------------------
+
+    def crt_reconstruct(self, circle: Tensor) -> Tensor:
+        """Reconstruct integer from circle encoding via Chinese Remainder Theorem.
+
+        1. Decode circle to integer residues per prime
+        2. Dot product with CRT weights
+        3. Reduce mod P
+
+        Args:
+            circle: [batch, seq, m, 2]
+
+        Returns:
+            [batch, seq] — reconstructed integers (float64)
+        """
+        residues = self._decode_residues_hard(circle)  # [B, S, m]
+        residues_64 = residues.double()  # float64 for precision
+        # CRT: n = sum(r_i * w_i) mod P
+        weighted = residues_64 * self.crt_weights  # [B, S, m]
+        n = weighted.sum(dim=-1) % self.P  # [B, S]
+        return n
+
+    def crt_reconstruct_signed(self, circle: Tensor) -> Tensor:
+        """CRT reconstruction with signed integer interpretation.
+
+        Values > P/2 are interpreted as negative: n - P.
+
+        Args:
+            circle: [batch, seq, m, 2]
+
+        Returns:
+            [batch, seq] — signed integers (float64)
+        """
+        n = self.crt_reconstruct(circle)
+        half_P = self.P / 2
+        return torch.where(n > half_P, n - self.P, n)
+
+    # ------------------------------------------------------------------
+    # Digit decomposition: integer -> base-10 digit vector
+    # ------------------------------------------------------------------
+
+    def integer_to_digits(self, n: Tensor) -> Tensor:
+        """Decompose integer to base-10 digit vector (least-significant first).
+
+        Uses integer division and modulo. For gradient flow, this is wrapped
+        in the full pipeline where gradients flow through the circle encoding
+        path (not through this discrete step).
+
+        Args:
+            n: [batch, seq] — integers (float64)
+
+        Returns:
+            [batch, seq, K] — digit vectors (float32)
+        """
+        n_long = n.long().abs()
+        digits = []
+        remainder = n_long
+        for _ in range(self.num_digits):
+            digits.append((remainder % 10).float())
+            remainder = remainder // 10
+        return torch.stack(digits, dim=-1)  # [B, S, K]
+
+    def integer_to_digits_with_sign(self, n: Tensor) -> Tensor:
+        """Decompose signed integer to digit vector with sign indicator.
+
+        Returns K+1 dimensions: K digits + 1 sign indicator (0 = positive, 1 = negative).
+
+        Args:
+            n: [batch, seq] — signed integers (float64)
+
+        Returns:
+            [batch, seq, K+1] — digit vectors with sign (float32)
+        """
+        sign = (n < 0).float().unsqueeze(-1)  # [B, S, 1]
+        digits = self.integer_to_digits(n)  # [B, S, K]
+        return torch.cat([digits, sign], dim=-1)  # [B, S, K+1]
+
+    # ------------------------------------------------------------------
+    # Full forward pass: compute all operations unconditionally
+    # ------------------------------------------------------------------
+
+    def forward(
+        self,
+        a_circle: Tensor,
+        b_circle: Tensor,
+        b_exp_circle: Tensor,
+    ) -> Tensor:
+        """Compute all four operations unconditionally in parallel.
+
+        Returns flattened circle encodings of all results, keeping the entire
+        pipeline differentiable. The injection layer learns to interpret these
+        (cos, sin) pairs.
+
+        Args:
+            a_circle: [batch, seq, m, 2] — operand A circle encoding
+            b_circle: [batch, seq, m, 2] — operand B circle encoding
+            b_exp_circle: [batch, seq, m, 2] — operand B exponent-reduced circle encoding
+
+        Returns:
+            results: [batch, seq, 4 * m * 2] — flattened circle encodings
+                     of (add, sub, mul, exp) results
+        """
+        B, S = a_circle.shape[:2]
+
+        # All four operations — each returns [B, S, m, 2]
+        add_circle = self.circle_add(a_circle, b_circle)
+        sub_circle = self.circle_sub(a_circle, b_circle)
+        mul_circle = self.circle_mul(a_circle, b_circle)
+        exp_circle = self.circle_exp(a_circle, b_exp_circle)
+
+        # Flatten each: [B, S, m, 2] -> [B, S, m*2]
+        add_flat = add_circle.reshape(B, S, -1)
+        sub_flat = sub_circle.reshape(B, S, -1)
+        mul_flat = mul_circle.reshape(B, S, -1)
+        exp_flat = exp_circle.reshape(B, S, -1)
+
+        # Concatenate all: [B, S, 4 * m * 2]
+        return torch.cat([add_flat, sub_flat, mul_flat, exp_flat], dim=-1)

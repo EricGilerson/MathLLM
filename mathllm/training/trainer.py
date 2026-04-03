@@ -378,21 +378,25 @@ class ARBTrainer:
 
     @torch.no_grad()
     def _evaluate(self) -> float:
-        """Evaluate on the eval set."""
+        """Evaluate on the eval set (capped by max_eval_batches if set)."""
         self.model.eval()
         total_loss = 0.0
         num_batches = 0
+        max_batches = self.config.max_eval_batches or len(self.eval_loader)
 
         eval_bar = tqdm(
             self.eval_loader,
             desc="Evaluating",
             unit="batch",
+            total=min(max_batches, len(self.eval_loader)),
             position=2,
             leave=False,
         )
 
         with self._autocast_context():
             for batch in eval_bar:
+                if num_batches >= max_batches:
+                    break
                 batch = {key: value.to(self.device) for key, value in batch.items()}
                 outputs = self.model(
                     input_ids=batch["input_ids"],

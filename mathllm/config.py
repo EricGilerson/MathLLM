@@ -51,6 +51,7 @@ class TrainingConfig:
     auto_resume_latest: bool = True
     device: str = "auto"
     early_stopping_patience: int = 3  # stop if eval loss doesn't improve for N evals
+    max_eval_batches: int = 0  # cap eval batches per evaluation (0 = no cap)
 
 
 @dataclass

@@ -15,6 +15,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
 from transformers import GPT2LMHeadModel, GPT2Tokenizer
+from transformers.cache_utils import DynamicCache
 
 from mathllm.arb.arb_module import ArithmeticResidualBlock
 from mathllm.config import Config
@@ -60,6 +61,8 @@ class GPT2WithARB(nn.Module):
         input_ids: Tensor,
         attention_mask: Tensor | None = None,
         labels: Tensor | None = None,
+        past_key_values: DynamicCache | None = None,
+        use_cache: bool = False,
     ) -> dict[str, Tensor | None]:
         """Forward pass with ARBs inserted after designated transformer layers.
 
@@ -69,17 +72,23 @@ class GPT2WithARB(nn.Module):
             input_ids: [batch, seq_len] token IDs
             attention_mask: [batch, seq_len] attention mask (1 = attend, 0 = ignore)
             labels: [batch, seq_len] target token IDs for loss computation
+            past_key_values: DynamicCache from prior generation steps
+            use_cache: whether to return updated KV cache
 
         Returns:
-            dict with 'loss' (if labels provided) and 'logits'
+            dict with 'loss' (if labels provided), 'logits', and optionally
+            'past_key_values'
         """
         transformer = self.base_model.transformer
         device = input_ids.device
         batch_size, seq_len = input_ids.shape
 
-        # Token + position embeddings
-        position_ids = torch.arange(seq_len, dtype=torch.long, device=device)
-        position_ids = position_ids.unsqueeze(0).expand(batch_size, -1)
+        # When using cache, position IDs start after the cached prefix
+        past_len = past_key_values.get_seq_length() if past_key_values else 0
+        cache_position = torch.arange(
+            past_len, past_len + seq_len, dtype=torch.long, device=device
+        )
+        position_ids = cache_position.unsqueeze(0).expand(batch_size, -1)
 
         inputs_embeds = transformer.wte(input_ids)
         position_embeds = transformer.wpe(position_ids)
@@ -87,10 +96,8 @@ class GPT2WithARB(nn.Module):
         hidden_states = transformer.drop(hidden_states)
 
         # Build causal attention mask in GPT-2 format
-        # GPT-2 expects [batch, 1, 1, seq_len] with 0.0 for attend, -10000.0 for mask
+        # GPT-2 expects [batch, 1, 1, total_len] with 0.0 for attend, -10000.0 for mask
         if attention_mask is not None:
-            # attention_mask: [batch, seq_len] with 1=attend, 0=pad
-            # Convert to [batch, 1, 1, seq_len] additive mask
             extended_mask = attention_mask[:, None, None, :].to(
                 dtype=hidden_states.dtype
             )
@@ -100,10 +107,15 @@ class GPT2WithARB(nn.Module):
 
         # Iterate through transformer blocks, inserting ARBs
         for i, block in enumerate(transformer.h):
-            block_output = block(
-                hidden_states,
-                attention_mask=extended_mask,
-            )
+            block_kwargs = {
+                "attention_mask": extended_mask,
+            }
+            if use_cache:
+                block_kwargs["past_key_values"] = past_key_values
+                block_kwargs["use_cache"] = True
+                block_kwargs["cache_position"] = cache_position
+
+            block_output = block(hidden_states, **block_kwargs)
             hidden_states = block_output[0]
 
             # Insert ARB after this layer if configured
@@ -128,7 +140,10 @@ class GPT2WithARB(nn.Module):
                 ignore_index=-100,
             )
 
-        return {"loss": loss, "logits": logits}
+        result: dict[str, object] = {"loss": loss, "logits": logits}
+        if use_cache:
+            result["past_key_values"] = past_key_values
+        return result
 
     @torch.no_grad()
     def generate(
@@ -139,7 +154,7 @@ class GPT2WithARB(nn.Module):
         top_k: int | None = None,
         greedy: bool = True,
     ) -> Tensor:
-        """Autoregressive text generation.
+        """Autoregressive text generation with KV caching.
 
         Args:
             input_ids: [batch, seq_len] prompt token IDs
@@ -153,13 +168,17 @@ class GPT2WithARB(nn.Module):
         """
         self.eval()
         generated = input_ids
+        cache = DynamicCache()
 
         for _ in range(max_new_tokens):
-            # Truncate to max model length if needed
-            max_len = self.base_model.config.n_positions
-            input_chunk = generated[:, -max_len:]
+            # On first step feed full prompt; after that only the new token
+            if cache.get_seq_length() == 0:
+                cur_input = generated
+            else:
+                cur_input = generated[:, -1:]
 
-            outputs = self.forward(input_chunk)
+            outputs = self.forward(cur_input, past_key_values=cache, use_cache=True)
+            cache = outputs["past_key_values"]
             next_token_logits = outputs["logits"][:, -1, :]  # [batch, vocab]
 
             if greedy:
@@ -167,7 +186,6 @@ class GPT2WithARB(nn.Module):
             else:
                 logits_scaled = next_token_logits / temperature
                 if top_k is not None:
-                    # Zero out everything except top-k
                     top_k_vals, _ = logits_scaled.topk(top_k, dim=-1)
                     threshold = top_k_vals[:, -1:]
                     logits_scaled = logits_scaled.masked_fill(

@@ -145,7 +145,7 @@ class ArithmeticDataGenerator:
         if r1 is None or abs(r1) > self.max_value:
             return None
 
-        # Second operand — smaller for mul
+        # Second operand -- smaller for mul
         b2_max = 100 if op2 == "mul" else 999
         b2 = self.rng.randint(1, b2_max)
 
@@ -214,6 +214,9 @@ class ArithmeticDataGenerator:
             "power_zero", "power_one", "square", "small_add",
             "boundary_add", "negative_result", "one_digit_all_ops",
             "double_zero", "large_identity", "cube",
+            "consecutive_add", "near_overflow_mul", "power_two",
+            "small_mul", "commutative_pair", "large_sub_to_zero",
+            "divide_by_one", "divide_self", "square_root_exact",
         ])
 
         if case_type == "zero_add":
@@ -280,11 +283,62 @@ class ArithmeticDataGenerator:
                 template = self.rng.choice(ADDITION_TEMPLATES)
                 return template.format(a=a, b=b, result=a + b)
             return self._generate_edge_case()
-        else:  # negative_result
+        elif case_type == "negative_result":
             b = self.rng.randint(1, 999)
             a = self.rng.randint(0, b - 1)
             template = self.rng.choice(SUBTRACTION_TEMPLATES)
             return template.format(a=a, b=b, result=a - b)
+        elif case_type == "consecutive_add":
+            n = self.rng.randint(0, self.max_value // 2 - 1)
+            a, b = n, n + 1
+            template = self.rng.choice(ADDITION_TEMPLATES)
+            return template.format(a=a, b=b, result=a + b)
+        elif case_type == "near_overflow_mul":
+            # Product barely under max_value
+            b = self.rng.randint(2, 999)
+            quotient = self.max_value // b
+            a = self.rng.randint(max(1, quotient - 100), quotient)
+            result = a * b
+            if result <= self.max_value:
+                template = self.rng.choice(MULTIPLICATION_TEMPLATES)
+                return template.format(a=a, b=b, result=result)
+            return self._generate_edge_case()
+        elif case_type == "power_two":
+            n = self.rng.randint(0, 29)  # 2^29 < 10^9
+            result = 2 ** n
+            template = self.rng.choice(EXPONENTIATION_TEMPLATES)
+            return template.format(a=2, b=n, result=result)
+        elif case_type == "small_mul":
+            a = self.rng.randint(1, 9)
+            b = self.rng.randint(1, 9)
+            template = self.rng.choice(MULTIPLICATION_TEMPLATES)
+            return template.format(a=a, b=b, result=a * b)
+        elif case_type == "commutative_pair":
+            a = self.rng.randint(1, 999)
+            b = self.rng.randint(1, 999)
+            result = a + b
+            if result <= self.max_value:
+                template = self.rng.choice(ADDITION_TEMPLATES)
+                return template.format(a=b, b=a, result=result)
+            return self._generate_edge_case()
+        elif case_type == "large_sub_to_zero":
+            a = self.rng.randint(1000, self.max_value)
+            b = a - self.rng.randint(0, 9)
+            template = self.rng.choice(SUBTRACTION_TEMPLATES)
+            return template.format(a=a, b=b, result=a - b)
+        elif case_type == "divide_by_one":
+            a = self.rng.randint(1, self.max_value)
+            template = self.rng.choice(DIVISION_EXACT_TEMPLATES)
+            return template.format(a=a, b=1, result=a)
+        elif case_type == "divide_self":
+            a = self.rng.randint(1, self.max_value)
+            template = self.rng.choice(DIVISION_EXACT_TEMPLATES)
+            return template.format(a=a, b=a, result=1)
+        else:  # square_root_exact
+            a = self.rng.randint(1, 31622)  # sqrt(10^9) ~ 31622
+            product = a * a
+            template = self.rng.choice(MULTIPLICATION_TEMPLATES)
+            return template.format(a=a, b=a, result=product)
 
     # ------------------------------------------------------------------
     # Top-level generation

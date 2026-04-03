@@ -76,10 +76,19 @@ def main():
     logger.info(f"Train: {len(train_ds)} examples, Eval: {len(eval_ds)} examples")
 
     train_loader = DataLoader(
-        train_ds, batch_size=config.training.batch_size, shuffle=True
+        train_ds, 
+        batch_size=config.training.batch_size, 
+        shuffle=True,
+        num_workers=2,
+        prefetch_factor=2,
+        pin_memory=(device.type != 'cpu')
     )
     eval_loader = DataLoader(
-        eval_ds, batch_size=config.training.batch_size
+        eval_ds, 
+        batch_size=config.training.batch_size,
+        num_workers=2,
+        prefetch_factor=2,
+        pin_memory=(device.type != 'cpu')
     )
 
     # Build model

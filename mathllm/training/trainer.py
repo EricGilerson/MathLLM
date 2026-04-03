@@ -135,21 +135,32 @@ class ARBTrainer:
             leave=False,
         )
 
+        import contextlib
+        # MPS supports float16 natively
+        use_autocast = self.device.type == "mps" or self.device.type == "cuda"
+        dtype = torch.float16 if self.device.type == "mps" else torch.bfloat16
+        autocast_ctx = torch.autocast(device_type=self.device.type, dtype=dtype) if use_autocast else contextlib.nullcontext()
+
         for batch in batch_bar:
             batch = {k: v.to(self.device) for k, v in batch.items()}
 
-            outputs = self.model(
-                input_ids=batch["input_ids"],
-                attention_mask=batch["attention_mask"],
-                labels=batch["labels"],
-            )
-            loss = outputs["loss"]
+            with autocast_ctx:
+                outputs = self.model(
+                    input_ids=batch["input_ids"],
+                    attention_mask=batch["attention_mask"],
+                    labels=batch["labels"],
+                )
+                loss = outputs["loss"]
 
             loss.backward()
             torch.nn.utils.clip_grad_norm_(self.arb_params, self.config.grad_clip)
             self.optimizer.step()
             self.scheduler.step()
-            self.optimizer.zero_grad()
+            # set_to_none=True avoids zeroing out memory, which saves bandwidth
+            self.optimizer.zero_grad(set_to_none=True)
+            
+            if self.device.type == "mps":
+                torch.mps.synchronize()
 
             total_loss += loss.item()
             num_batches += 1
@@ -194,13 +205,19 @@ class ARBTrainer:
             leave=False,
         )
 
+        import contextlib
+        use_autocast = self.device.type == "mps" or self.device.type == "cuda"
+        dtype = torch.float16 if self.device.type == "mps" else torch.bfloat16
+        autocast_ctx = torch.autocast(device_type=self.device.type, dtype=dtype) if use_autocast else contextlib.nullcontext()
+
         for batch in eval_bar:
             batch = {k: v.to(self.device) for k, v in batch.items()}
-            outputs = self.model(
-                input_ids=batch["input_ids"],
-                attention_mask=batch["attention_mask"],
-                labels=batch["labels"],
-            )
+            with autocast_ctx:
+                outputs = self.model(
+                    input_ids=batch["input_ids"],
+                    attention_mask=batch["attention_mask"],
+                    labels=batch["labels"],
+                )
             total_loss += outputs["loss"].item()
             num_batches += 1
             eval_bar.set_postfix(loss=f"{total_loss / num_batches:.4f}")

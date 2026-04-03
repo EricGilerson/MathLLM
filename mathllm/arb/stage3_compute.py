@@ -84,6 +84,14 @@ class ArithmeticCompute(nn.Module):
             torch.tensor([2.0 * math.pi / p for p in primes], dtype=torch.float32),
         )
 
+        # Precompute exponent templates for circle_exp (avoids per-forward allocation)
+        # For each prime p_i, store (p_i - 1) evenly-spaced unit-circle points
+        for i, p in enumerate(primes):
+            pm1 = p - 1
+            angles = torch.arange(pm1, dtype=torch.float32) * (2.0 * math.pi / pm1)
+            exp_tmpl = torch.stack([torch.cos(angles), torch.sin(angles)], dim=-1)  # [pm1, 2]
+            self.register_buffer(f"exp_templates_{i}", exp_tmpl)
+
     def _get_template(self, i: int) -> Tensor:
         return getattr(self, f"templates_{i}")
 
@@ -92,6 +100,9 @@ class ArithmeticCompute(nn.Module):
 
     def _get_exp_onehot(self, i: int) -> Tensor:
         return getattr(self, f"exp_onehot_{i}")
+
+    def _get_exp_template(self, i: int) -> Tensor:
+        return getattr(self, f"exp_templates_{i}")
 
     # ------------------------------------------------------------------
     # Addition: complex multiplication of circle encodings
@@ -254,15 +265,11 @@ class ArithmeticCompute(nn.Module):
         """
         base_soft = self._decode_residues_soft(base_circle)
 
-        # Decode exponent residues — these use (p_i - 1) templates
+        # Decode exponent residues — use pre-cached (p_i - 1) templates
         exp_soft = []
         for i, p in enumerate(self.primes):
             e_i = exp_circle[:, :, i, :]  # [B, S, 2]
-            # Build templates for exponent: p_i - 1 evenly spaced points
-            pm1 = p - 1
-            angles = torch.arange(pm1, dtype=torch.float32, device=e_i.device)
-            angles = angles * (2.0 * math.pi / pm1)
-            exp_templates = torch.stack([torch.cos(angles), torch.sin(angles)], dim=-1)  # [pm1, 2]
+            exp_templates = self._get_exp_template(i)  # [pm1, 2] — pre-cached buffer
             similarity = torch.matmul(e_i, exp_templates.T)  # [B, S, pm1]
             soft = F.softmax(similarity * self.softmax_temperature, dim=-1)
             exp_soft.append(soft)

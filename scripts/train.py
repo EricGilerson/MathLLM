@@ -113,6 +113,9 @@ def main():
 
     # Compile forward pass for fused kernels (PyTorch 2.0+, CUDA only)
     if device.type == "cuda" and hasattr(torch, "compile"):
+        import torch._dynamo
+        torch._dynamo.config.verbose = False
+        torch._dynamo.config.suppress_errors = True
         logger.info("Compiling model forward pass with torch.compile...")
         model.forward = torch.compile(model.forward, mode="reduce-overhead")
 

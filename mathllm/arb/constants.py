@@ -109,7 +109,7 @@ def compute_crt_weights(primes: tuple[int, ...]) -> Tensor:
 
     The integer n is reconstructed as: n = (sum_i r_i * w_i) mod P
 
-    Returns: Tensor of shape [m] (float64 to avoid overflow — weights can be ~7.4e9)
+    Returns: Tensor of shape [m] (float32)
     """
     P = compute_product(primes)
     weights = []
@@ -117,7 +117,7 @@ def compute_crt_weights(primes: tuple[int, ...]) -> Tensor:
         M_i = P // p
         M_i_inv = mod_inverse(M_i, p)
         weights.append(M_i * M_i_inv)
-    return torch.tensor(weights, dtype=torch.float64)
+    return torch.tensor(weights, dtype=torch.float32)
 
 
 def compute_multiplication_tables(primes: tuple[int, ...]) -> list[Tensor]:
@@ -192,4 +192,4 @@ def compute_digit_decomposition_weights(K: int = DEFAULT_NUM_DIGITS) -> Tensor:
 
     Returns: Tensor of shape [K] (float64)
     """
-    return torch.tensor([10**k for k in range(K)], dtype=torch.float64)
+    return torch.tensor([10**k for k in range(K)], dtype=torch.float32)

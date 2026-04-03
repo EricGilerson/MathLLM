@@ -317,12 +317,11 @@ class ArithmeticCompute(nn.Module):
             circle: [batch, seq, m, 2]
 
         Returns:
-            [batch, seq] — reconstructed integers (float64)
+            [batch, seq] — reconstructed integers
         """
         residues = self._decode_residues_hard(circle)  # [B, S, m]
-        residues_64 = residues.double()  # float64 for precision
         # CRT: n = sum(r_i * w_i) mod P
-        weighted = residues_64 * self.crt_weights  # [B, S, m]
+        weighted = residues * self.crt_weights  # [B, S, m]
         n = weighted.sum(dim=-1) % self.P  # [B, S]
         return n
 
@@ -335,7 +334,7 @@ class ArithmeticCompute(nn.Module):
             circle: [batch, seq, m, 2]
 
         Returns:
-            [batch, seq] — signed integers (float64)
+            [batch, seq] — signed integers
         """
         n = self.crt_reconstruct(circle)
         half_P = self.P / 2
@@ -353,7 +352,7 @@ class ArithmeticCompute(nn.Module):
         path (not through this discrete step).
 
         Args:
-            n: [batch, seq] — integers (float64)
+            n: [batch, seq] — integers
 
         Returns:
             [batch, seq, K] — digit vectors (float32)
@@ -372,7 +371,7 @@ class ArithmeticCompute(nn.Module):
         Returns K+1 dimensions: K digits + 1 sign indicator (0 = positive, 1 = negative).
 
         Args:
-            n: [batch, seq] — signed integers (float64)
+            n: [batch, seq] — signed integers
 
         Returns:
             [batch, seq, K+1] — digit vectors with sign (float32)

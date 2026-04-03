@@ -4,6 +4,7 @@
 import argparse
 import logging
 import sys
+from pathlib import Path
 
 sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent.parent))
 
@@ -42,9 +43,20 @@ def main():
 
     # Load or generate data
     if args.data_path:
-        logger.info(f"Loading data from {args.data_path}")
+        data_path = Path(args.data_path)
+    else:
+        # Auto-detect pre-generated data from scripts/generate_data.py
+        default_data_path = Path(config.data.output_dir) / "train.jsonl"
+        if default_data_path.exists():
+            data_path = default_data_path
+            logger.info(f"Found existing training data at {data_path}")
+        else:
+            data_path = None
+
+    if data_path is not None:
+        logger.info(f"Loading data from {data_path}")
         dataset = ArithmeticDataset(
-            jsonl_path=args.data_path,
+            jsonl_path=data_path,
             tokenizer=tokenizer,
             max_length=config.training.max_seq_len,
         )

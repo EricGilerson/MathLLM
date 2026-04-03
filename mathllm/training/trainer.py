@@ -7,8 +7,9 @@ trained. The base model and frozen ARB stages never receive gradients.
 from __future__ import annotations
 
 import logging
-import time
 from pathlib import Path
+
+from tqdm import tqdm
 
 import torch
 import torch.nn as nn
@@ -83,14 +84,22 @@ class ARBTrainer:
             "learning_rate": [],
         }
 
-        for epoch in range(self.config.max_epochs):
+        epoch_bar = tqdm(
+            range(self.config.max_epochs),
+            desc="Training",
+            unit="epoch",
+            position=0,
+            leave=True,
+        )
+
+        for epoch in epoch_bar:
             epoch_loss = self._train_epoch(epoch, history)
-            logger.info(f"Epoch {epoch + 1}/{self.config.max_epochs} — avg loss: {epoch_loss:.4f}")
+            epoch_bar.set_postfix(loss=f"{epoch_loss:.4f}")
 
             if self.eval_loader is not None:
                 eval_loss = self._evaluate()
                 history["eval_loss"].append(eval_loss)
-                logger.info(f"  Eval loss: {eval_loss:.4f}")
+                epoch_bar.set_postfix(loss=f"{epoch_loss:.4f}", eval=f"{eval_loss:.4f}")
 
                 if eval_loss < self.best_eval_loss:
                     self.best_eval_loss = eval_loss
@@ -98,13 +107,9 @@ class ARBTrainer:
                     self._save_checkpoint("best")
                 else:
                     self.patience_counter += 1
-                    logger.info(
-                        f"  No improvement ({self.patience_counter}"
-                        f"/{self.config.early_stopping_patience})"
-                    )
 
                 if self.patience_counter >= self.config.early_stopping_patience:
-                    logger.info(
+                    tqdm.write(
                         f"Early stopping at epoch {epoch + 1} — "
                         f"no improvement for {self.config.early_stopping_patience} evals"
                     )
@@ -113,6 +118,7 @@ class ARBTrainer:
 
             self._save_checkpoint(f"epoch_{epoch + 1}")
 
+        epoch_bar.close()
         return history
 
     def _train_epoch(self, epoch: int, history: dict[str, list[float]]) -> float:
@@ -121,7 +127,15 @@ class ARBTrainer:
         total_loss = 0.0
         num_batches = 0
 
-        for batch in self.train_loader:
+        batch_bar = tqdm(
+            self.train_loader,
+            desc=f"Epoch {epoch + 1}",
+            unit="batch",
+            position=1,
+            leave=False,
+        )
+
+        for batch in batch_bar:
             batch = {k: v.to(self.device) for k, v in batch.items()}
 
             outputs = self.model(
@@ -141,12 +155,12 @@ class ARBTrainer:
             num_batches += 1
             self.global_step += 1
 
+            # Update progress bar with running metrics
+            avg = total_loss / num_batches
+            lr = self.scheduler.get_last_lr()[0]
+            batch_bar.set_postfix(loss=f"{avg:.4f}", lr=f"{lr:.2e}", step=self.global_step)
+
             if self.global_step % self.config.log_every == 0:
-                avg = total_loss / num_batches
-                lr = self.scheduler.get_last_lr()[0]
-                logger.info(
-                    f"  Step {self.global_step}: loss={avg:.4f} lr={lr:.2e}"
-                )
                 history["train_loss"].append(avg)
                 history["learning_rate"].append(lr)
 
@@ -157,9 +171,12 @@ class ARBTrainer:
             ):
                 eval_loss = self._evaluate()
                 history["eval_loss"].append(eval_loss)
-                logger.info(f"  Step {self.global_step}: eval_loss={eval_loss:.4f}")
+                batch_bar.set_postfix(
+                    loss=f"{avg:.4f}", lr=f"{lr:.2e}", eval=f"{eval_loss:.4f}"
+                )
                 self.model.train()
 
+        batch_bar.close()
         return total_loss / max(num_batches, 1)
 
     @torch.no_grad()
@@ -169,7 +186,15 @@ class ARBTrainer:
         total_loss = 0.0
         num_batches = 0
 
-        for batch in self.eval_loader:
+        eval_bar = tqdm(
+            self.eval_loader,
+            desc="Evaluating",
+            unit="batch",
+            position=2,
+            leave=False,
+        )
+
+        for batch in eval_bar:
             batch = {k: v.to(self.device) for k, v in batch.items()}
             outputs = self.model(
                 input_ids=batch["input_ids"],
@@ -178,7 +203,9 @@ class ARBTrainer:
             )
             total_loss += outputs["loss"].item()
             num_batches += 1
+            eval_bar.set_postfix(loss=f"{total_loss / num_batches:.4f}")
 
+        eval_bar.close()
         return total_loss / max(num_batches, 1)
 
     def _save_checkpoint(self, name: str) -> None:

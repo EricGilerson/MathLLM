@@ -39,12 +39,14 @@ class ArithmeticCompute(nn.Module):
         primes: tuple[int, ...],
         num_digits: int = 10,
         softmax_temperature: float = 1000.0,
+        repair_division_during_training: bool = True,
     ):
         super().__init__()
         self.primes = primes
         self.num_primes = len(primes)
         self.num_digits = num_digits
         self.softmax_temperature = softmax_temperature
+        self.repair_division_during_training = repair_division_during_training
         self.P = compute_product(primes)
 
         # Keep the registered buffer MPS-safe. Exact CRT reconstruction uses a
@@ -393,7 +395,8 @@ class ArithmeticCompute(nn.Module):
         # This is a non-differentiable correction (uses hard decode + CRT), but
         # only activates when b shares a factor with an RNS prime.
         needs_repair = (b_zero > 0.5).any(dim=-1)  # [B, S] — any prime poisoned?
-        if needs_repair.any():
+        should_repair = not self.training or self.repair_division_during_training
+        if should_repair and needs_repair.any():
             result = self._repair_division_residues(result, b_zero)
 
         return result

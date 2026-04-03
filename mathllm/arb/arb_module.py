@@ -55,7 +55,12 @@ class ArithmeticResidualBlock(nn.Module):
         self.encode = RNSCircleEncoder(primes, num_digits)
 
         # Stage 3: Frozen computation
-        self.compute = ArithmeticCompute(primes, num_digits, softmax_temperature)
+        self.compute = ArithmeticCompute(
+            primes,
+            num_digits,
+            softmax_temperature,
+            repair_division_during_training=False,
+        )
 
         # Stage 4: Learned injection
         self.inject = ResultInjector(hidden_dim, total_result_dim, dropout=dropout)

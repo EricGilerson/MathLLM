@@ -333,9 +333,6 @@ class ARBTrainer:
             self.optimizer.step()
             self.optimizer.zero_grad(set_to_none=True)
 
-            if self.device.type == "mps":
-                torch.mps.synchronize()
-
             total_loss += loss.item()
             num_batches += 1
             self.global_step += 1

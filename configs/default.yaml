@@ -23,12 +23,14 @@ training:
   weight_decay: 0.01
   batch_size: 32
   max_epochs: 10
+  checkpoint_every_steps: 0
   max_seq_len: 128
   warmup_steps: 500
   grad_clip: 1.0
   log_every: 100
   eval_every: 1000
   checkpoint_dir: "checkpoints/"
+  auto_resume_latest: true
   device: "auto"
   early_stopping_patience: 3  # stop if eval loss doesn't improve for N evals
 

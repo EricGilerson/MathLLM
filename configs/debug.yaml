@@ -23,12 +23,14 @@ training:
   weight_decay: 0.01
   batch_size: 4
   max_epochs: 2
+  checkpoint_every_steps: 0
   max_seq_len: 64
   warmup_steps: 50
   grad_clip: 1.0
   log_every: 10
   eval_every: 100
   checkpoint_dir: "checkpoints_debug/"
+  auto_resume_latest: true
   device: "auto"
   early_stopping_patience: 3
 

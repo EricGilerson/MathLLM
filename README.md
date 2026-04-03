@@ -84,6 +84,12 @@ python scripts/generate_data.py --config configs/default.yaml
 # Train
 python scripts/train.py --config configs/default.yaml
 
+# Run a small incremental chunk; training auto-resumes from checkpoints/latest
+python scripts/train.py --config configs/default.yaml --epochs-to-run 2
+
+# Or budget by optimizer steps instead of epochs
+python scripts/train.py --config configs/default.yaml --steps-to-run 1000
+
 # Evaluate
 python scripts/evaluate.py --config configs/default.yaml
 
@@ -126,6 +132,14 @@ All settings are controlled via YAML configs with dataclass defaults:
 | **Data** | 50K/50K/10K split, max 10 digits, max value 10^9 |
 | **Training** | GPT-2 base, lr 3e-4, batch 32, 10 epochs, warmup 500 steps, early stopping (patience 3) |
 | **Evaluation** | 200 samples/config, digits 1-10 |
+
+Checkpointing and resume behavior:
+
+- End-of-epoch checkpoints are always written.
+- Optional step checkpoints are controlled by `training.checkpoint_every_steps`.
+- `checkpoints/arb_latest.pt` is refreshed on every checkpoint and auto-loaded by default on the next training run.
+- Use `--resume PATH` to force a specific checkpoint, or `--no-resume` to start fresh.
+- Use `--epochs-to-run N` or `--steps-to-run N` to train in small chunks without resetting optimizer or LR progress.
 
 ## Design Decisions
 

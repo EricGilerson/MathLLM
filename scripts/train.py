@@ -17,7 +17,7 @@ from mathllm.data.dataset import ArithmeticDataset
 from mathllm.data.generator import ArithmeticDataGenerator
 from mathllm.model.gpt2_arb import GPT2WithARB
 from mathllm.model.utils import count_parameters, get_device
-from mathllm.training.trainer import ARBTrainer
+from mathllm.training.trainer import ARBTrainer, resolve_resume_checkpoint
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -30,6 +30,13 @@ def main():
                         help="Path to pre-generated JSONL data. If not provided, generates on the fly.")
     parser.add_argument("--resume", type=str, default=None,
                         help="Path to checkpoint to resume from")
+    parser.add_argument("--no-resume", action="store_true",
+                        help="Disable automatic resume from the latest checkpoint")
+    budget_group = parser.add_mutually_exclusive_group()
+    budget_group.add_argument("--epochs-to-run", type=int, default=None,
+                              help="Number of additional epochs to run this invocation")
+    budget_group.add_argument("--steps-to-run", type=int, default=None,
+                              help="Number of additional optimizer steps to run this invocation")
     args = parser.parse_args()
 
     config = load_config(args.config)
@@ -106,12 +113,25 @@ def main():
         device=device,
     )
 
-    if args.resume:
-        trainer.load_checkpoint(args.resume)
+    resume_path = resolve_resume_checkpoint(
+        checkpoint_dir=config.training.checkpoint_dir,
+        explicit_resume=args.resume,
+        auto_resume_latest=config.training.auto_resume_latest,
+        disable_resume=args.no_resume,
+    )
+    if resume_path is not None:
+        if args.resume:
+            logger.info(f"Resuming from explicit checkpoint: {resume_path}")
+        else:
+            logger.info(f"Auto-resuming from latest checkpoint: {resume_path}")
+        trainer.load_checkpoint(resume_path)
 
     # Train
     logger.info("Starting training...")
-    history = trainer.train()
+    history = trainer.train(
+        epochs_to_run=args.epochs_to_run,
+        steps_to_run=args.steps_to_run,
+    )
     logger.info("Training complete!")
 
     # Print final metrics

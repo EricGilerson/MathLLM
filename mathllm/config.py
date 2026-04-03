@@ -41,12 +41,14 @@ class TrainingConfig:
     weight_decay: float = 0.01
     batch_size: int = 32
     max_epochs: int = 10
+    checkpoint_every_steps: int = 0
     max_seq_len: int = 128
     warmup_steps: int = 500
     grad_clip: float = 1.0
     log_every: int = 100
     eval_every: int = 1000
     checkpoint_dir: str = "checkpoints/"
+    auto_resume_latest: bool = True
     device: str = "auto"
     early_stopping_patience: int = 3  # stop if eval loss doesn't improve for N evals
 

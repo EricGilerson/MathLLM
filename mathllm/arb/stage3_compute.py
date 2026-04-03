@@ -36,7 +36,7 @@ class ArithmeticCompute(nn.Module):
         self,
         primes: tuple[int, ...],
         num_digits: int = 10,
-        softmax_temperature: float = 100.0,
+        softmax_temperature: float = 1000.0,
     ):
         super().__init__()
         self.primes = primes
@@ -240,6 +240,11 @@ class ArithmeticCompute(nn.Module):
         3. Lookup in exponentiation table T[a, k] = a^k mod p_i
         4. Re-encode result to circle
 
+        Special case: b=0 means a^0 = 1 for all a. Since Fermat reduction maps
+        both b=0 and b=p-1 to index 0, we detect b=0 (all exponent residues are 0)
+        and return circle encoding of 1 in that case. The table stores a^(p-1) at
+        index 0 so that b > 0 with b ≡ 0 mod (p-1) works correctly.
+
         Args:
             base_circle: [batch, seq, m, 2] — circle encoding of base
             exp_circle: [batch, seq, m, 2] — circle encoding of exponent (Fermat-reduced)
@@ -262,6 +267,13 @@ class ArithmeticCompute(nn.Module):
             soft = F.softmax(similarity * self.softmax_temperature, dim=-1)
             exp_soft.append(soft)
 
+        # Detect b=0: when b=0, ALL exponent residues decode to 0.
+        # Compute probability that b=0 as the product of p(residue=0) across primes.
+        b_zero_prob = exp_soft[0][:, :, 0]  # [B, S]
+        for i in range(1, self.num_primes):
+            b_zero_prob = b_zero_prob * exp_soft[i][:, :, 0]
+        # b_zero_prob: [B, S] — close to 1 when b=0, close to 0 otherwise
+
         result_cos = []
         result_sin = []
 
@@ -276,6 +288,12 @@ class ArithmeticCompute(nn.Module):
             # Weighted sum of circle templates
             templates = self._get_template(i)  # [p, 2]
             result_circle_i = torch.matmul(result_dist, templates)  # [B, S, 2]
+
+            # For b=0: a^0 = 1, so circle encoding is template[1] = (cos(2π/p), sin(2π/p))
+            one_circle = templates[1]  # [2] — circle encoding of residue 1
+            # Interpolate: b_zero_prob * one_circle + (1 - b_zero_prob) * table_result
+            bz = b_zero_prob.unsqueeze(-1)  # [B, S, 1]
+            result_circle_i = bz * one_circle + (1.0 - bz) * result_circle_i
 
             result_cos.append(result_circle_i[..., 0])
             result_sin.append(result_circle_i[..., 1])

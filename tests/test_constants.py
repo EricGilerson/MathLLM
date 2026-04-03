@@ -153,7 +153,9 @@ class TestExponentiationTables:
         tables = compute_exponentiation_tables(DEFAULT_PRIMES)
         for i, p in enumerate(DEFAULT_PRIMES):
             for a in range(p):
-                for k in range(p - 1):
+                # k=0 stores a^(p-1) mod p (not a^0) to handle Fermat edge case
+                assert tables[i][a, 0].item() == pow(a, p - 1, p)
+                for k in range(1, p - 1):
                     assert tables[i][a, k].item() == pow(a, k, p)
 
 

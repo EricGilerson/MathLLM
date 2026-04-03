@@ -143,6 +143,11 @@ def compute_exponentiation_tables(primes: tuple[int, ...]) -> list[Tensor]:
     T_p[a, k] = a^k mod p for a in {0, ..., p-1}, k in {0, ..., p-2}.
     (k ranges over 0..p-2 because by Fermat, a^(p-1) ≡ 1, so exponents reduce mod p-1.)
 
+    Special handling for k=0: we store a^(p-1) mod p instead of a^0.
+    This is because Fermat reduction maps both b=0 and b=p-1 to index 0,
+    and for a ≡ 0 mod p, a^(p-1) = 0 while a^0 = 1. We handle b=0 (a^0 = 1)
+    as a special case in circle_exp.
+
     Returns: list of m tensors, each of shape [p_i, p_i - 1] (float32)
     """
     tables = []
@@ -150,7 +155,10 @@ def compute_exponentiation_tables(primes: tuple[int, ...]) -> list[Tensor]:
         exp_range = p - 1  # exponents 0 .. p-2
         T = torch.zeros(p, exp_range, dtype=torch.float32)
         for a in range(p):
-            for k in range(exp_range):
+            # k=0: store a^(p-1) mod p (not a^0) to correctly handle
+            # b > 0 where b ≡ 0 mod (p-1)
+            T[a, 0] = pow(a, p - 1, p)
+            for k in range(1, exp_range):
                 T[a, k] = pow(a, k, p)
         tables.append(T)
     return tables

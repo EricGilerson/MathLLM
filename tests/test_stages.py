@@ -97,7 +97,7 @@ class TestRNSCircleEncoder:
 class TestArithmeticCompute:
     @pytest.fixture
     def compute(self):
-        return ArithmeticCompute(DEFAULT_PRIMES, num_digits=10, softmax_temperature=100.0)
+        return ArithmeticCompute(DEFAULT_PRIMES, num_digits=10, softmax_temperature=1000.0)
 
     @pytest.fixture
     def encoder(self):

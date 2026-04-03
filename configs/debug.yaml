@@ -4,7 +4,7 @@ rns:
 
 arb:
   layer_positions: [4, 8, 10]
-  softmax_temperature: 100.0
+  softmax_temperature: 1000.0
   num_results: 4
 
 data:

@@ -36,7 +36,7 @@ class ArithmeticResidualBlock(nn.Module):
         primes: tuple[int, ...] = (7, 11, 13, 17, 19, 23, 29, 31, 37),
         num_digits: int = 10,
         num_results: int = 4,
-        softmax_temperature: float = 100.0,
+        softmax_temperature: float = 1000.0,
     ):
         super().__init__()
         self.hidden_dim = hidden_dim

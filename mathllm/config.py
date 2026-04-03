@@ -18,7 +18,7 @@ class RNSConfig:
 @dataclass
 class ARBConfig:
     layer_positions: tuple[int, ...] = (4, 8, 10)
-    softmax_temperature: float = 100.0
+    softmax_temperature: float = 1000.0
     num_results: int = 4  # add, sub, mul, exp
 
 

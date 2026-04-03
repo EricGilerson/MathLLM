@@ -6,6 +6,7 @@ arb:
   layer_positions: [4, 8, 10]
   softmax_temperature: 1000.0
   num_results: 4
+  dropout: 0.1
 
 data:
   num_positive: 500
@@ -29,6 +30,7 @@ training:
   eval_every: 100
   checkpoint_dir: "checkpoints_debug/"
   device: "auto"
+  early_stopping_patience: 3
 
 evaluation:
   num_samples_per_config: 20

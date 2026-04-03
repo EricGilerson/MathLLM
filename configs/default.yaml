@@ -6,6 +6,7 @@ arb:
   layer_positions: [4, 8, 10]
   softmax_temperature: 1000.0
   num_results: 4  # add, sub, mul, exp
+  dropout: 0.1  # dropout on extraction and injection layers
 
 data:
   num_positive: 50000
@@ -29,6 +30,7 @@ training:
   eval_every: 1000
   checkpoint_dir: "checkpoints/"
   device: "auto"
+  early_stopping_patience: 3  # stop if eval loss doesn't improve for N evals
 
 evaluation:
   num_samples_per_config: 200

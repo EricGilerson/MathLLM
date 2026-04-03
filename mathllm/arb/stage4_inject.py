@@ -20,15 +20,18 @@ class ResultInjector(nn.Module):
     and projects to hidden_dim. The residual connection is applied here.
     """
 
-    def __init__(self, hidden_dim: int, result_dim: int):
+    def __init__(self, hidden_dim: int, result_dim: int, dropout: float = 0.1):
         """
         Args:
             hidden_dim: Transformer hidden dimension (e.g. 768 for GPT-2)
             result_dim: Total dimension of concatenated result vectors
                         (e.g. 4 * (K+1) = 4 * 11 = 44 for 4 ops with sign)
+            dropout: Dropout rate on the projected delta before injection.
+                     Prevents the injection from always firing on every token.
         """
         super().__init__()
         self.projection = nn.Linear(result_dim, hidden_dim)
+        self.dropout = nn.Dropout(dropout)
 
         # CRITICAL: Initialize to zero so ARB is a no-op at start.
         # The residual connection passes h through unchanged until training
@@ -47,4 +50,5 @@ class ResultInjector(nn.Module):
             h': [batch, seq, hidden_dim] — h + delta_h
         """
         delta_h = self.projection(results)
+        delta_h = self.dropout(delta_h)
         return h + delta_h

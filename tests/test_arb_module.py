@@ -68,6 +68,7 @@ class TestARBModule:
     def test_batch_independence(self):
         """Different batch elements should produce independent results."""
         arb = ArithmeticResidualBlock(hidden_dim=64, primes=DEFAULT_PRIMES)
+        arb.eval()  # Disable dropout for deterministic batch independence check
         with torch.no_grad():
             arb.inject.projection.weight.fill_(0.01)
 

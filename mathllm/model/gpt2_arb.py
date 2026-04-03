@@ -49,6 +49,7 @@ class GPT2WithARB(nn.Module):
                 num_digits=config.rns.num_digit_slots,
                 num_results=config.arb.num_results,
                 softmax_temperature=config.arb.softmax_temperature,
+                dropout=config.arb.dropout,
             )
 
     def forward(

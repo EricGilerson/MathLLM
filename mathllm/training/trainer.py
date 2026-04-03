@@ -57,6 +57,8 @@ class ARBTrainer:
 
         self.global_step = 0
         self.best_eval_loss = float("inf")
+        self.patience_counter = 0
+        self.early_stopped = False
 
     @staticmethod
     def _lr_schedule(warmup_steps: int, total_steps: int):
@@ -92,7 +94,22 @@ class ARBTrainer:
 
                 if eval_loss < self.best_eval_loss:
                     self.best_eval_loss = eval_loss
+                    self.patience_counter = 0
                     self._save_checkpoint("best")
+                else:
+                    self.patience_counter += 1
+                    logger.info(
+                        f"  No improvement ({self.patience_counter}"
+                        f"/{self.config.early_stopping_patience})"
+                    )
+
+                if self.patience_counter >= self.config.early_stopping_patience:
+                    logger.info(
+                        f"Early stopping at epoch {epoch + 1} — "
+                        f"no improvement for {self.config.early_stopping_patience} evals"
+                    )
+                    self.early_stopped = True
+                    break
 
             self._save_checkpoint(f"epoch_{epoch + 1}")
 

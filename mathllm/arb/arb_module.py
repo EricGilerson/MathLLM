@@ -37,6 +37,7 @@ class ArithmeticResidualBlock(nn.Module):
         num_digits: int = 10,
         num_results: int = 4,
         softmax_temperature: float = 1000.0,
+        dropout: float = 0.1,
     ):
         super().__init__()
         self.hidden_dim = hidden_dim
@@ -48,7 +49,7 @@ class ArithmeticResidualBlock(nn.Module):
         total_result_dim = num_results * num_primes * 2
 
         # Stage 1: Learned extraction
-        self.extract = OperandExtractor(hidden_dim, num_digits)
+        self.extract = OperandExtractor(hidden_dim, num_digits, dropout=dropout)
 
         # Stage 2: Frozen encoding
         self.encode = RNSCircleEncoder(primes, num_digits)
@@ -57,7 +58,7 @@ class ArithmeticResidualBlock(nn.Module):
         self.compute = ArithmeticCompute(primes, num_digits, softmax_temperature)
 
         # Stage 4: Learned injection
-        self.inject = ResultInjector(hidden_dim, total_result_dim)
+        self.inject = ResultInjector(hidden_dim, total_result_dim, dropout=dropout)
 
         # Freeze stages 2 and 3
         for param in self.encode.parameters():

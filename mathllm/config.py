@@ -20,6 +20,7 @@ class ARBConfig:
     layer_positions: tuple[int, ...] = (4, 8, 10)
     softmax_temperature: float = 1000.0
     num_results: int = 4  # add, sub, mul, exp
+    dropout: float = 0.1  # dropout on extraction and injection layers
 
 
 @dataclass
@@ -47,6 +48,7 @@ class TrainingConfig:
     eval_every: int = 1000
     checkpoint_dir: str = "checkpoints/"
     device: str = "auto"
+    early_stopping_patience: int = 3  # stop if eval loss doesn't improve for N evals
 
 
 @dataclass

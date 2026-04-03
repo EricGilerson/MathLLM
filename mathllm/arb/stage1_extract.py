@@ -18,11 +18,13 @@ class OperandExtractor(nn.Module):
 
     Each operand is represented as K digits in base 10, least-significant first.
     The projections are learned; rounding uses a straight-through estimator.
+    Dropout on the input prevents overfitting to specific hidden-state patterns.
     """
 
-    def __init__(self, hidden_dim: int, num_digits: int = 10):
+    def __init__(self, hidden_dim: int, num_digits: int = 10, dropout: float = 0.1):
         super().__init__()
         self.num_digits = num_digits
+        self.dropout = nn.Dropout(dropout)
         self.W_a = nn.Linear(hidden_dim, num_digits)
         self.W_b = nn.Linear(hidden_dim, num_digits)
 
@@ -36,8 +38,9 @@ class OperandExtractor(nn.Module):
             d_a: Digit vector for operand A [batch, seq_len, K], integers in [0, 9]
             d_b: Digit vector for operand B [batch, seq_len, K], integers in [0, 9]
         """
-        d_a_cont = self.W_a(h)
-        d_b_cont = self.W_b(h)
+        h_drop = self.dropout(h)
+        d_a_cont = self.W_a(h_drop)
+        d_b_cont = self.W_b(h_drop)
 
         d_a = ste_round_clamp(d_a_cont, low=0, high=9)
         d_b = ste_round_clamp(d_b_cont, low=0, high=9)

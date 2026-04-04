@@ -42,6 +42,7 @@ class TestModelIntegration:
 
         from mathllm.model.gpt2_arb import GPT2WithARB
 
+        config.arb.injector_init_std = 0.0
         model = GPT2WithARB(config)
         base = GPT2LMHeadModel.from_pretrained("gpt2", attn_implementation="eager")
         base.eval()

@@ -74,6 +74,7 @@ class GPT2WithARB(nn.Module):
                 num_results=config.arb.num_results,
                 softmax_temperature=config.arb.softmax_temperature,
                 dropout=config.arb.dropout,
+                injector_init_std=config.arb.injector_init_std,
             )
 
     def forward(
@@ -170,11 +171,18 @@ class GPT2WithARB(nn.Module):
             # Shift logits and labels for next-token prediction
             shift_logits = logits[:, :-1, :].contiguous()
             shift_labels = labels[:, 1:].contiguous()
-            loss = F.cross_entropy(
-                shift_logits.view(-1, shift_logits.size(-1)),
-                shift_labels.view(-1),
-                ignore_index=-100,
-            )
+            flat_logits = shift_logits.view(-1, shift_logits.size(-1))
+            flat_labels = shift_labels.view(-1)
+            valid_count = flat_labels.ne(-100).sum()
+            if valid_count.item() == 0:
+                loss = flat_logits.new_zeros(())
+            else:
+                loss = F.cross_entropy(
+                    flat_logits,
+                    flat_labels,
+                    ignore_index=-100,
+                    reduction="sum",
+                ) / valid_count
 
         result: dict[str, object] = {"loss": loss, "logits": logits}
         if use_cache:

@@ -7,6 +7,7 @@ arb:
   softmax_temperature: 1000.0
   num_results: 5
   dropout: 0.1
+  injector_init_std: 0.001
 
 data:
   num_positive: 500
@@ -33,6 +34,7 @@ training:
   final_model_dir: "trained_model_debug/"
   auto_resume_latest: true
   device: "auto"
+  answer_only_loss: true
   early_stopping_patience: 3
   max_eval_batches: 10
 

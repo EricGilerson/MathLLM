@@ -38,6 +38,7 @@ class ArithmeticResidualBlock(nn.Module):
         num_results: int = 5,
         softmax_temperature: float = 1000.0,
         dropout: float = 0.1,
+        injector_init_std: float = 1e-3,
     ):
         super().__init__()
         self.hidden_dim = hidden_dim
@@ -63,7 +64,12 @@ class ArithmeticResidualBlock(nn.Module):
         )
 
         # Stage 4: Learned injection
-        self.inject = ResultInjector(hidden_dim, total_result_dim, dropout=dropout)
+        self.inject = ResultInjector(
+            hidden_dim,
+            total_result_dim,
+            dropout=dropout,
+            init_std=injector_init_std,
+        )
 
         # Freeze stages 2 and 3
         for param in self.encode.parameters():

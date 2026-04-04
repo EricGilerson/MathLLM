@@ -15,11 +15,20 @@ class TestARBModule:
 
     def test_zero_init_is_identity(self):
         """With zero-initialized W_proj, ARB should be a no-op (output = input)."""
-        arb = ArithmeticResidualBlock(hidden_dim=64, primes=DEFAULT_PRIMES)
+        arb = ArithmeticResidualBlock(
+            hidden_dim=64,
+            primes=DEFAULT_PRIMES,
+            injector_init_std=0.0,
+        )
         h = torch.randn(2, 5, 64)
         h_out = arb(h)
         assert torch.allclose(h_out, h, atol=1e-6), \
             "Zero-init ARB should produce h' = h"
+
+    def test_default_injector_init_is_non_zero(self):
+        """Default init should be small but non-zero so gradients can propagate."""
+        arb = ArithmeticResidualBlock(hidden_dim=64, primes=DEFAULT_PRIMES)
+        assert arb.inject.projection.weight.abs().sum() > 0
 
     def test_gradient_flow_to_extraction(self):
         """Gradients should flow back to the extraction weights."""

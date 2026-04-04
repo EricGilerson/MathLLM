@@ -21,6 +21,7 @@ class ARBConfig:
     softmax_temperature: float = 1000.0
     num_results: int = 5  # add, sub, mul, exp, div
     dropout: float = 0.1  # dropout on extraction and injection layers
+    injector_init_std: float = 1e-3  # small non-zero init so gradients reach extraction
 
 
 @dataclass
@@ -51,6 +52,7 @@ class TrainingConfig:
     final_model_dir: str = "trained_model/"
     auto_resume_latest: bool = True
     device: str = "auto"
+    answer_only_loss: bool = True  # train arithmetic examples mainly on answer tokens
     early_stopping_patience: int = 3  # stop if eval loss doesn't improve for N evals
     max_eval_batches: int = 0  # cap eval batches per evaluation (0 = no cap)
     eval_batch_size: int = 0  # eval DataLoader batch size (0 = 2x batch_size)

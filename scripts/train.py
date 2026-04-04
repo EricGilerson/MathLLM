@@ -68,6 +68,7 @@ def main():
             jsonl_path=data_path,
             tokenizer=tokenizer,
             max_length=config.training.max_seq_len,
+            answer_only_loss=config.training.answer_only_loss,
         )
     else:
         logger.info("Generating training data on the fly...")
@@ -78,6 +79,7 @@ def main():
             examples=examples,
             tokenizer=tokenizer,
             max_length=config.training.max_seq_len,
+            answer_only_loss=config.training.answer_only_loss,
         )
 
     # Split into train/eval

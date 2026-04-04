@@ -6,9 +6,57 @@ import json
 import random
 import re
 from pathlib import Path
+from typing import Any
 
 import torch
 from torch.utils.data import Dataset
+
+
+_NUMBER_PATTERN = re.compile(r"-?\d[\d,]*(?:\.\d+)?")
+_ARITHMETIC_PATTERNS = (
+    re.compile(r"\d[\d,]*(?:\.\d+)?\s*[+\-*/×÷^]\s*-?\d[\d,]*(?:\.\d+)?"),
+    re.compile(r"\b(?:plus|minus|times|multiplied by|divided by|sum of|difference|product|quotient)\b", re.IGNORECASE),
+    re.compile(r"\b(?:sin|cos|tan|sqrt|ln|exp)\s*\(", re.IGNORECASE),
+)
+
+
+def _looks_like_arithmetic(text: str) -> bool:
+    """Return True when text resembles a supervised arithmetic example."""
+    return any(pattern.search(text) for pattern in _ARITHMETIC_PATTERNS)
+
+
+def _infer_target_start(text: str) -> int | None:
+    """Infer the start index of the answer span for arithmetic examples.
+
+    The generated templates consistently place the final answer as the last
+    numeric value in the example. For arithmetic examples we therefore mask
+    the prompt and train only on that final numeric suffix.
+    """
+    if not _looks_like_arithmetic(text):
+        return None
+
+    matches = list(_NUMBER_PATTERN.finditer(text))
+    if not matches:
+        return None
+    return matches[-1].start()
+
+
+def _normalize_example(
+    raw: str | dict[str, Any],
+    *,
+    answer_only_loss: bool,
+) -> dict[str, Any]:
+    """Normalize legacy and structured example records."""
+    if isinstance(raw, str):
+        text = raw
+        target_start = _infer_target_start(text) if answer_only_loss else None
+        return {"text": text, "target_start": target_start}
+
+    text = str(raw["text"])
+    target_start = raw.get("target_start")
+    if target_start is None and answer_only_loss:
+        target_start = _infer_target_start(text)
+    return {"text": text, "target_start": target_start}
 
 
 def _augment_text(text: str, rng: random.Random) -> str:
@@ -76,12 +124,13 @@ class ArithmeticDataset(Dataset):
 
     def __init__(
         self,
-        examples: list[str] | None = None,
+        examples: list[str | dict[str, Any]] | None = None,
         jsonl_path: str | Path | None = None,
         tokenizer=None,
         max_length: int = 128,
         augment: bool = False,
         seed: int = 42,
+        answer_only_loss: bool = True,
     ):
         """
         Args:
@@ -102,6 +151,12 @@ class ArithmeticDataset(Dataset):
         self.max_length = max_length
         self.augment = augment
         self.aug_rng = random.Random(seed)
+        self.answer_only_loss = answer_only_loss
+        self.records = [
+            _normalize_example(example, answer_only_loss=answer_only_loss)
+            for example in self.examples
+        ]
+        self.examples = [record["text"] for record in self.records]
 
         # Tokenize all examples upfront for efficiency (when not augmenting)
         if tokenizer is not None and not augment:
@@ -114,13 +169,13 @@ class ArithmeticDataset(Dataset):
                     self.tokenizer.pad_token = self.tokenizer.eos_token
 
     @staticmethod
-    def _load_jsonl(path: str | Path) -> list[str]:
+    def _load_jsonl(path: str | Path) -> list[dict[str, Any]]:
         """Load text examples from JSONL file."""
         examples = []
         with open(path) as f:
             for line in f:
                 data = json.loads(line.strip())
-                examples.append(data["text"])
+                examples.append(data)
         return examples
 
     def _tokenize(self) -> None:
@@ -136,6 +191,23 @@ class ArithmeticDataset(Dataset):
             max_length=self.max_length,
             return_tensors="pt",
         )
+        self.labels = self.encodings["input_ids"].clone()
+        self.labels[self.encodings["attention_mask"] == 0] = -100
+
+        for idx, record in enumerate(self.records):
+            target_start = record["target_start"]
+            if target_start is None:
+                continue
+
+            prefix = record["text"][:target_start]
+            prefix_ids = self.tokenizer(
+                prefix,
+                truncation=True,
+                max_length=self.max_length,
+                add_special_tokens=False,
+            )["input_ids"]
+            prefix_len = min(len(prefix_ids), self.max_length)
+            self.labels[idx, :prefix_len] = -100
 
     def set_tokenizer(self, tokenizer) -> None:
         """Set tokenizer and tokenize examples."""
@@ -164,16 +236,26 @@ class ArithmeticDataset(Dataset):
             )
             input_ids = enc["input_ids"].squeeze(0)
             attention_mask = enc["attention_mask"].squeeze(0)
+            labels = input_ids.clone()
+            labels[attention_mask == 0] = -100
+
+            target_start = _infer_target_start(text) if self.answer_only_loss else None
+            if target_start is not None:
+                prefix = text[:target_start]
+                prefix_ids = self.tokenizer(
+                    prefix,
+                    truncation=True,
+                    max_length=self.max_length,
+                    add_special_tokens=False,
+                )["input_ids"]
+                prefix_len = min(len(prefix_ids), self.max_length)
+                labels[:prefix_len] = -100
         else:
             if self.encodings is None:
                 raise RuntimeError("Tokenizer not set. Call set_tokenizer() first.")
             input_ids = self.encodings["input_ids"][idx]
             attention_mask = self.encodings["attention_mask"][idx]
-
-        # Labels: same as input_ids for causal LM.
-        # Set padding positions to -100 so they're ignored in loss.
-        labels = input_ids.clone()
-        labels[attention_mask == 0] = -100
+            labels = self.labels[idx]
 
         return {
             "input_ids": input_ids,
@@ -187,16 +269,18 @@ class ArithmeticDataset(Dataset):
         split_idx = int(n * train_ratio)
 
         train_ds = ArithmeticDataset(
-            examples=self.examples[:split_idx],
+            examples=self.records[:split_idx],
             tokenizer=self.tokenizer,
             max_length=self.max_length,
             augment=self.augment,
+            answer_only_loss=self.answer_only_loss,
         )
         # Never augment eval data — we want deterministic evaluation
         eval_ds = ArithmeticDataset(
-            examples=self.examples[split_idx:],
+            examples=self.records[split_idx:],
             tokenizer=self.tokenizer,
             max_length=self.max_length,
             augment=False,
+            answer_only_loss=self.answer_only_loss,
         )
         return train_ds, eval_ds

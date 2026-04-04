@@ -66,6 +66,7 @@ configs/
 scripts/
 ├── generate_data.py        # Generate synthetic arithmetic dataset
 ├── train.py                # Run training
+├── infer.py                # Run direct prompts against exported bundles
 └── evaluate.py             # Evaluate model accuracy
 ```
 
@@ -98,6 +99,12 @@ python scripts/evaluate.py --config configs/default.yaml
 
 # Evaluate an exported final model bundle directly
 python scripts/evaluate.py --model-dir trained_model/
+
+# Run a direct prompt against the exported bundle
+python scripts/infer.py --model-dir trained_model/ --prompt "347 * 291 ="
+
+# Or open an interactive REPL for manual checks
+python scripts/infer.py --model-dir trained_model/
 
 # Fast iteration (smaller dataset, fewer epochs)
 python scripts/train.py --config configs/debug.yaml
@@ -153,6 +160,7 @@ Final model export:
 - The export bundle includes `model_state.pt`, `config.yaml`, tokenizer files, and the saved GPT-2 architecture config in `base_model_config/`.
 - Override the destination with `--export-dir PATH`.
 - Load the bundle with `python scripts/evaluate.py --model-dir trained_model/`.
+- Run manual prompts with `python scripts/infer.py --model-dir trained_model/ --prompt "347 * 291 ="`.
 
 ## Design Decisions
 

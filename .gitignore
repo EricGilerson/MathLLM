@@ -16,3 +16,4 @@ wandb/
 .pytest_cache/
 CLAUDE.md
 /.idea
+/trained_model

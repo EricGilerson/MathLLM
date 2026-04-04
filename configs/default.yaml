@@ -8,6 +8,7 @@ arb:
   num_results: 5  # add, sub, mul, exp, div
   dropout: 0.1  # dropout on extraction and injection layers
   injector_init_std: 0.001
+  gate_init_logit: -2.0  # sigmoid(-2) ~ 0.12; learnable injection gate
 
 data:
   num_positive: 50000
@@ -34,10 +35,16 @@ training:
   final_model_dir: "trained_model/"
   auto_resume_latest: true
   device: "auto"
-  answer_only_loss: true
+  answer_only_loss: false  # full next-token loss for richer gradients
   early_stopping_patience: 3  # stop if eval loss doesn't improve for N evals
   max_eval_batches: 5
   eval_batch_size: 512  # match training batch_size to avoid CUDA OOM
+  # Phased training
+  phase1_epochs: 3   # extraction-only training
+  phase2_epochs: 4   # extraction + injection, aux loss active
+  phase3_epochs: 3   # end-to-end, aux loss decayed
+  aux_loss_weight: 1.0
+  aux_loss_decay: 0.1
 
 evaluation:
   num_samples_per_config: 200

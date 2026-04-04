@@ -1,7 +1,8 @@
-"""Training loop for ARB parameters.
+"""Training loop for ARB parameters with phased training.
 
-Only the ARB learned parameters (extraction and injection projections) are
-trained. The base model and frozen ARB stages never receive gradients.
+Phase 1: Train extraction only (freeze injection), auxiliary digit loss only.
+Phase 2: Train extraction + injection, LM loss + auxiliary loss.
+Phase 3: End-to-end, LM loss + decayed auxiliary loss.
 """
 
 from __future__ import annotations
@@ -18,6 +19,7 @@ from torch.utils.data import DataLoader, RandomSampler, SequentialSampler
 
 from mathllm.config import TrainingConfig
 from mathllm.model.gpt2_arb import GPT2WithARB
+from mathllm.training.losses import compute_extraction_loss
 
 logger = logging.getLogger(__name__)
 
@@ -73,23 +75,112 @@ class ARBTrainer:
         self.steps_per_epoch = len(train_loader)
         self.total_training_steps = self.steps_per_epoch * config.max_epochs
 
-        # Collect ONLY ARB learned parameters
-        self.arb_params = model.get_trainable_parameters()
-        param_count = sum(p.numel() for p in self.arb_params)
-        logger.info(f"Training {param_count:,} ARB parameters")
-
-        self.optimizer = torch.optim.AdamW(
-            self.arb_params,
-            lr=config.lr,
-            weight_decay=config.weight_decay,
-        )
-
         self.global_step = 0
         self.completed_epochs = 0
         self.batches_completed_in_epoch = 0
         self.best_eval_loss = float("inf")
         self.patience_counter = 0
         self.early_stopped = False
+        self._current_phase = 0  # will be set on first epoch
+
+        # Initial optimizer setup (will be rebuilt on phase transitions)
+        self._build_optimizer()
+
+    # ------------------------------------------------------------------
+    # Phase management
+    # ------------------------------------------------------------------
+
+    def _get_phase(self, epoch: int) -> int:
+        """Determine training phase from epoch number."""
+        p1 = self.config.phase1_epochs
+        p2 = p1 + self.config.phase2_epochs
+        if epoch < p1:
+            return 1
+        if epoch < p2:
+            return 2
+        return 3
+
+    def _configure_phase(self, phase: int) -> None:
+        """Freeze/unfreeze parameters for the given phase and rebuild optimizer."""
+        if phase == self._current_phase:
+            return
+
+        old_phase = self._current_phase
+        self._current_phase = phase
+
+        if phase == 1:
+            # Extraction only: freeze injection
+            for arb in self.model.arbs.values():
+                for p in arb.extract.parameters():
+                    p.requires_grad = True
+                for p in arb.inject.parameters():
+                    p.requires_grad = False
+        else:
+            # Phase 2 & 3: everything trainable
+            for arb in self.model.arbs.values():
+                for p in arb.extract.parameters():
+                    p.requires_grad = True
+                for p in arb.inject.parameters():
+                    p.requires_grad = True
+
+        self._build_optimizer()
+        logger.info(
+            "Phase transition: %s -> %s (trainable params: %s)",
+            old_phase, phase,
+            sum(p.numel() for p in self.arb_params),
+        )
+
+    def _build_optimizer(self) -> None:
+        """(Re)build optimizer with currently-trainable ARB parameters."""
+        self.arb_params = self.model.get_trainable_parameters()
+        if not self.arb_params:
+            logger.warning("No trainable parameters found for optimizer")
+            self.arb_params = [torch.zeros(1, requires_grad=True)]
+        self.optimizer = torch.optim.AdamW(
+            self.arb_params,
+            lr=self.config.lr,
+            weight_decay=self.config.weight_decay,
+        )
+
+    def _compute_loss(
+        self,
+        outputs: dict,
+        batch: dict[str, torch.Tensor],
+        phase: int,
+    ) -> tuple[torch.Tensor, float, float]:
+        """Compute total loss based on current training phase.
+
+        Returns:
+            (total_loss, lm_loss_value, aux_loss_value) for logging.
+        """
+        lm_loss = outputs["loss"]
+        arb_extractions = outputs.get("arb_extractions", {})
+
+        # Compute auxiliary extraction loss
+        aux_loss = compute_extraction_loss(
+            arb_extractions=arb_extractions,
+            gt_digits_a=batch["digits_a"],
+            gt_digits_b=batch["digits_b"],
+            has_aux=batch["has_aux"],
+            attention_mask=batch["attention_mask"],
+        )
+
+        aux_weight = self.config.aux_loss_weight
+        if phase == 3:
+            aux_weight *= self.config.aux_loss_decay
+
+        if phase == 1:
+            # Extraction-only: use only auxiliary loss
+            total_loss = aux_weight * aux_loss
+        else:
+            # Phase 2 & 3: LM loss + weighted aux loss
+            total_loss = lm_loss + aux_weight * aux_loss
+
+        return total_loss, lm_loss.item(), aux_loss.item()
+
+    # ------------------------------------------------------------------
+    # LR schedule
+    # ------------------------------------------------------------------
 
     def _lr_scale(self, step: int) -> float:
         """Linear warmup then linear decay using 1-based training steps."""
@@ -111,6 +202,10 @@ class ARBTrainer:
         for group in self.optimizer.param_groups:
             group["lr"] = lr
         return lr
+
+    # ------------------------------------------------------------------
+    # Utilities
+    # ------------------------------------------------------------------
 
     def _autocast_context(self):
         """Return an autocast context when the device supports it."""
@@ -187,6 +282,10 @@ class ARBTrainer:
         if cuda_state is not None and torch.cuda.is_available():
             torch.cuda.set_rng_state_all(cuda_state)
 
+    # ------------------------------------------------------------------
+    # Training loop
+    # ------------------------------------------------------------------
+
     def train(
         self,
         *,
@@ -204,6 +303,8 @@ class ARBTrainer:
             "train_loss": [],
             "eval_loss": [],
             "learning_rate": [],
+            "aux_loss": [],
+            "lm_loss": [],
         }
 
         if self.global_step >= self.total_training_steps:
@@ -235,10 +336,14 @@ class ARBTrainer:
             if self.global_step >= step_limit or self.global_step >= self.total_training_steps:
                 break
 
+            # Configure phase at start of each epoch
+            phase = self._get_phase(epoch)
+            self._configure_phase(phase)
+
             epoch_loss, epoch_completed = self._train_epoch(epoch, history, step_limit)
             if epoch_loss is not None:
                 made_progress = True
-                epoch_bar.set_postfix(loss=f"{epoch_loss:.4f}")
+                epoch_bar.set_postfix(loss=f"{epoch_loss:.4f}", phase=phase)
 
             if not epoch_completed:
                 break
@@ -247,7 +352,7 @@ class ARBTrainer:
             if self.eval_loader is not None:
                 eval_loss = self._evaluate()
                 history["eval_loss"].append(eval_loss)
-                epoch_bar.set_postfix(loss=f"{epoch_loss_value:.4f}", eval=f"{eval_loss:.4f}")
+                epoch_bar.set_postfix(loss=f"{epoch_loss_value:.4f}", eval=f"{eval_loss:.4f}", phase=phase)
 
                 if eval_loss < self.best_eval_loss:
                     self.best_eval_loss = eval_loss
@@ -284,7 +389,10 @@ class ARBTrainer:
         """Train for part or all of one epoch."""
         self.model.train()
         total_loss = 0.0
+        total_lm_loss = 0.0
+        total_aux_loss = 0.0
         num_batches = 0
+        phase = self._current_phase
 
         start_batch = self.batches_completed_in_epoch if epoch == self.completed_epochs else 0
         train_loader = self._build_epoch_train_loader(epoch)
@@ -301,7 +409,7 @@ class ARBTrainer:
         batch_bar = tqdm(
             total=self.steps_per_epoch,
             initial=start_batch,
-            desc=f"Epoch {epoch + 1}",
+            desc=f"Epoch {epoch + 1} [P{phase}]",
             unit="batch",
             position=1,
             leave=False,
@@ -325,26 +433,37 @@ class ARBTrainer:
                     attention_mask=batch["attention_mask"],
                     labels=batch["labels"],
                 )
-                loss = outputs["loss"]
+                loss, lm_val, aux_val = self._compute_loss(outputs, batch, phase)
 
             lr = self._set_learning_rate(self.global_step + 1)
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(self.arb_params, self.config.grad_clip)
+            if loss.requires_grad:
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(self.arb_params, self.config.grad_clip)
             self.optimizer.step()
             self.optimizer.zero_grad(set_to_none=True)
 
             total_loss += loss.item()
+            total_lm_loss += lm_val
+            total_aux_loss += aux_val
             num_batches += 1
             self.global_step += 1
             self.batches_completed_in_epoch += 1
 
             avg = total_loss / num_batches
+            avg_aux = total_aux_loss / num_batches
             batch_bar.update(1)
-            batch_bar.set_postfix(loss=f"{avg:.4f}", lr=f"{lr:.2e}", step=self.global_step)
+            batch_bar.set_postfix(
+                loss=f"{avg:.4f}",
+                aux=f"{avg_aux:.4f}",
+                lr=f"{lr:.2e}",
+                step=self.global_step,
+            )
 
             if self.global_step % self.config.log_every == 0:
                 history["train_loss"].append(avg)
                 history["learning_rate"].append(lr)
+                history["aux_loss"].append(avg_aux)
+                history["lm_loss"].append(total_lm_loss / num_batches)
 
             if (
                 self.config.checkpoint_every_steps > 0
@@ -361,6 +480,7 @@ class ARBTrainer:
                 history["eval_loss"].append(eval_loss)
                 batch_bar.set_postfix(
                     loss=f"{avg:.4f}",
+                    aux=f"{avg_aux:.4f}",
                     lr=f"{lr:.2e}",
                     eval=f"{eval_loss:.4f}",
                     step=self.global_step,
@@ -409,6 +529,10 @@ class ARBTrainer:
         eval_bar.close()
         return (total_loss / max(num_batches, 1)).item()
 
+    # ------------------------------------------------------------------
+    # Checkpointing
+    # ------------------------------------------------------------------
+
     def _checkpoint_payload(self) -> dict[str, object]:
         """Build the full checkpoint payload."""
         arb_state = {key: arb.state_dict() for key, arb in self.model.arbs.items()}
@@ -422,6 +546,7 @@ class ARBTrainer:
             "patience_counter": self.patience_counter,
             "steps_per_epoch": self.steps_per_epoch,
             "max_epochs": self.config.max_epochs,
+            "current_phase": self._current_phase,
             "rng_state": self._capture_rng_state(),
         }
 
@@ -445,7 +570,6 @@ class ARBTrainer:
         for key, state in ckpt["arb_state"].items():
             self.model.arbs[key].load_state_dict(state)
 
-        self.optimizer.load_state_dict(ckpt["optimizer"])
         self.global_step = ckpt["global_step"]
         saved_steps_per_epoch = ckpt.get("steps_per_epoch", self.steps_per_epoch)
 
@@ -460,6 +584,21 @@ class ARBTrainer:
         self.patience_counter = ckpt.get("patience_counter", 0)
         self._restore_rng_state(ckpt.get("rng_state"))
 
+        # Restore phase and rebuild optimizer before loading optimizer state
+        saved_phase = ckpt.get("current_phase", 0)
+        if saved_phase > 0:
+            self._current_phase = 0  # force reconfigure
+            self._configure_phase(saved_phase)
+
+        # Load optimizer state after rebuilding with correct param groups
+        try:
+            self.optimizer.load_state_dict(ckpt["optimizer"])
+        except (ValueError, KeyError):
+            logger.warning(
+                "Could not restore optimizer state (likely phase transition "
+                "changed param groups). Starting with fresh optimizer."
+            )
+
         if saved_steps_per_epoch != self.steps_per_epoch:
             logger.warning(
                 "Checkpoint was created with %s steps/epoch, current run has %s. "
@@ -469,9 +608,10 @@ class ARBTrainer:
             )
 
         logger.info(
-            "Loaded checkpoint from %s (step %s, epoch %s, batch %s)",
+            "Loaded checkpoint from %s (step %s, epoch %s, batch %s, phase %s)",
             path,
             self.global_step,
             self.completed_epochs,
             self.batches_completed_in_epoch,
+            self._current_phase,
         )

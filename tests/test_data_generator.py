@@ -87,7 +87,7 @@ class TestArithmeticDataGenerator:
         pattern = re.compile(r"^(\d+)\s*\+\s*(\d+)\s*=\s*(-?\d+)$")
         found = 0
         for ex in examples:
-            match = pattern.match(ex.strip())
+            match = pattern.match(ex.text.strip())
             if match:
                 a, b, result = int(match.group(1)), int(match.group(2)), int(match.group(3))
                 assert a + b == result, f"Wrong addition: {a} + {b} != {result}"
@@ -103,7 +103,7 @@ class TestArithmeticDataGenerator:
 
         pattern = re.compile(r"(\d+)\s*[*×x]\s*(\d+)\s*=\s*(\d+)")
         for ex in examples:
-            match = pattern.search(ex)
+            match = pattern.search(ex.text)
             if match:
                 result = int(match.group(3))
                 assert result <= config.max_value, f"Result {result} exceeds max"
@@ -130,4 +130,17 @@ class TestArithmeticDataGenerator:
         gen2 = ArithmeticDataGenerator(config)
         ex1 = gen1.generate_dataset()
         ex2 = gen2.generate_dataset()
-        assert ex1 == ex2
+        assert [e.text for e in ex1] == [e.text for e in ex2]
+
+    def test_records_have_metadata(self):
+        """Positive integer arithmetic should have operand metadata."""
+        config = self._make_config(num_positive=200, num_negative=0, num_edge_cases=0)
+        gen = ArithmeticDataGenerator(config)
+        examples = gen.generate_dataset()
+
+        # At least some examples should have aux targets
+        with_aux = [ex for ex in examples if ex.operand_a is not None]
+        assert len(with_aux) > 0
+        for ex in with_aux:
+            assert ex.operand_b is not None
+            assert ex.result is not None

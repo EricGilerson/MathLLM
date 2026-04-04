@@ -10,6 +10,7 @@ layers from the first update step.
 
 from __future__ import annotations
 
+import torch
 import torch.nn as nn
 from torch import Tensor
 
@@ -27,6 +28,7 @@ class ResultInjector(nn.Module):
         result_dim: int,
         dropout: float = 0.1,
         init_std: float = 1e-3,
+        gate_init_logit: float = -2.0,
     ):
         """
         Args:
@@ -37,10 +39,13 @@ class ResultInjector(nn.Module):
                      Prevents the injection from always firing on every token.
             init_std: Stddev for the projection weight init. Set to 0.0 to
                       recover exact identity-at-init behavior.
+            gate_init_logit: Initial logit for the learnable injection gate.
+                             sigmoid(-2) ~ 0.12 starts small but learnable.
         """
         super().__init__()
         self.projection = nn.Linear(result_dim, hidden_dim)
         self.dropout = nn.Dropout(dropout)
+        self.gate_logit = nn.Parameter(torch.tensor(gate_init_logit))
 
         # Small non-zero init keeps the block near-identity while allowing
         # gradients to reach earlier ARB stages immediately.
@@ -51,15 +56,16 @@ class ResultInjector(nn.Module):
         nn.init.zeros_(self.projection.bias)
 
     def forward(self, results: Tensor, h: Tensor) -> Tensor:
-        """Inject results into hidden state via residual connection.
+        """Inject results into hidden state via gated residual connection.
 
         Args:
             results: [batch, seq, result_dim] — concatenated result digit vectors
             h: [batch, seq, hidden_dim] — original hidden state
 
         Returns:
-            h': [batch, seq, hidden_dim] — h + delta_h
+            h': [batch, seq, hidden_dim] — h + gate * delta_h
         """
+        gate = torch.sigmoid(self.gate_logit)
         delta_h = self.projection(results)
         delta_h = self.dropout(delta_h)
-        return h + delta_h
+        return h + gate * delta_h

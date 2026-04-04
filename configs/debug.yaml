@@ -34,9 +34,14 @@ training:
   final_model_dir: "trained_model_debug/"
   auto_resume_latest: true
   device: "auto"
-  answer_only_loss: true
+  answer_only_loss: false
   early_stopping_patience: 3
   max_eval_batches: 10
+  phase1_epochs: 1
+  phase2_epochs: 1
+  phase3_epochs: 0
+  aux_loss_weight: 1.0
+  aux_loss_decay: 0.1
 
 evaluation:
   num_samples_per_config: 20

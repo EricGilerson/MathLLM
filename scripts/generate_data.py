@@ -35,10 +35,15 @@ def main():
     output_path = generator.save_dataset(examples, config.data.output_dir)
     logger.info(f"Saved {len(examples)} examples to {output_path}")
 
+    # Count examples with auxiliary targets
+    aux_count = sum(1 for ex in examples if ex.operand_a is not None)
+    logger.info(f"  Examples with aux targets: {aux_count}/{len(examples)}")
+
     # Print a few samples
     logger.info("\nSample examples:")
     for ex in examples[:10]:
-        logger.info(f"  {ex}")
+        aux_tag = f" [a={ex.operand_a}, b={ex.operand_b}]" if ex.operand_a is not None else " [no aux]"
+        logger.info(f"  {ex.text}{aux_tag}")
 
 
 if __name__ == "__main__":

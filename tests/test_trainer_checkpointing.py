@@ -32,7 +32,16 @@ class ToyDataset(Dataset):
             "input_ids": torch.tensor([value], dtype=torch.long),
             "attention_mask": torch.tensor([1], dtype=torch.long),
             "labels": torch.tensor([0], dtype=torch.long),
+            "digits_a": torch.zeros(10, dtype=torch.float32),
+            "digits_b": torch.zeros(10, dtype=torch.float32),
+            "has_aux": torch.tensor(False),
         }
+
+
+class _DummySubModule(nn.Module):
+    """Placeholder submodule for extract/inject."""
+    def __init__(self):
+        super().__init__()
 
 
 class DummyARB(nn.Module):
@@ -41,6 +50,8 @@ class DummyARB(nn.Module):
     def __init__(self):
         super().__init__()
         self.scale = nn.Parameter(torch.tensor(0.5))
+        self.extract = _DummySubModule()
+        self.inject = _DummySubModule()
 
 
 class DummyModel(nn.Module):
@@ -59,7 +70,7 @@ class DummyModel(nn.Module):
         target = labels.float()
         mask = attention_mask.float()
         loss = (((prediction - target) ** 2) * mask).mean()
-        return {"loss": loss}
+        return {"loss": loss, "arb_extractions": {}}
 
 
 def make_config(checkpoint_dir: str) -> TrainingConfig:
@@ -79,6 +90,10 @@ def make_config(checkpoint_dir: str) -> TrainingConfig:
         auto_resume_latest=True,
         device="cpu",
         early_stopping_patience=3,
+        # Skip phased training for dummy model tests
+        phase1_epochs=0,
+        phase2_epochs=0,
+        phase3_epochs=1,
     )
 
 

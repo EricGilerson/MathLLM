@@ -75,6 +75,7 @@ class GPT2WithARB(nn.Module):
                 softmax_temperature=config.arb.softmax_temperature,
                 dropout=config.arb.dropout,
                 injector_init_std=config.arb.injector_init_std,
+                gate_init_logit=config.arb.gate_init_logit,
             )
 
     def forward(
@@ -135,6 +136,7 @@ class GPT2WithARB(nn.Module):
 
         # Iterate through transformer blocks, inserting ARBs
         presents = []
+        arb_extractions: dict[int, tuple[Tensor, Tensor]] = {}
         for i, block in enumerate(transformer.h):
             block_kwargs = {
                 "attention_mask": extended_mask,
@@ -157,7 +159,8 @@ class GPT2WithARB(nn.Module):
 
             # Insert ARB after this layer if configured
             if i in self.arb_positions:
-                hidden_states = self.arbs[str(i)](hidden_states)
+                hidden_states, d_a, d_b = self.arbs[str(i)](hidden_states)
+                arb_extractions[i] = (d_a, d_b)
 
         # Final layer norm
         hidden_states = transformer.ln_f(hidden_states)
@@ -184,7 +187,11 @@ class GPT2WithARB(nn.Module):
                     reduction="sum",
                 ) / valid_count
 
-        result: dict[str, object] = {"loss": loss, "logits": logits}
+        result: dict[str, object] = {
+            "loss": loss,
+            "logits": logits,
+            "arb_extractions": arb_extractions,
+        }
         if use_cache:
             result["past_key_values"] = past_key_values if use_dynamic_cache else presents
         return result

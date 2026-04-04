@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import math
 import random
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
@@ -43,6 +44,30 @@ from mathllm.data.templates import (
     TAN_TEMPLATES,
     TRANSCENDENTAL_EXP_TEMPLATES,
 )
+
+
+@dataclass
+class ArithmeticRecord:
+    """Structured training example with metadata for auxiliary losses."""
+
+    text: str
+    op_type: str  # "add", "sub", "mul", "exp", "div", "negative", "edge", etc.
+    operand_a: int | None = None  # None for negative/transcendental/float examples
+    operand_b: int | None = None
+    result: int | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> ArithmeticRecord:
+        return cls(
+            text=str(d["text"]),
+            op_type=d.get("op_type", "unknown"),
+            operand_a=d.get("operand_a"),
+            operand_b=d.get("operand_b"),
+            result=d.get("result"),
+        )
 
 
 class ArithmeticDataGenerator:
@@ -74,21 +99,23 @@ class ArithmeticDataGenerator:
         high = 10**num_digits - 1
         return self.rng.randint(low, high), self.rng.randint(low, high)
 
-    def _generate_addition(self) -> str | None:
+    def _generate_addition(self) -> ArithmeticRecord | None:
         a, b = self._sample_operands()
         result = a + b
         if abs(result) > self.max_value:
             return None
         template = self.rng.choice(ADDITION_TEMPLATES)
-        return template.format(a=a, b=b, result=result)
+        text = template.format(a=a, b=b, result=result)
+        return ArithmeticRecord(text=text, op_type="add", operand_a=a, operand_b=b, result=result)
 
-    def _generate_subtraction(self) -> str | None:
+    def _generate_subtraction(self) -> ArithmeticRecord | None:
         a, b = self._sample_operands()
         result = a - b
         template = self.rng.choice(SUBTRACTION_TEMPLATES)
-        return template.format(a=a, b=b, result=result)
+        text = template.format(a=a, b=b, result=result)
+        return ArithmeticRecord(text=text, op_type="sub", operand_a=a, operand_b=b, result=result)
 
-    def _generate_multiplication(self) -> str | None:
+    def _generate_multiplication(self) -> ArithmeticRecord | None:
         # Use smaller operands to keep product in range
         d1 = self.rng.randint(1, min(5, self.config.max_digits))
         d2 = self.rng.randint(1, min(5, self.config.max_digits))
@@ -100,9 +127,10 @@ class ArithmeticDataGenerator:
         if abs(result) > self.max_value:
             return None
         template = self.rng.choice(MULTIPLICATION_TEMPLATES)
-        return template.format(a=a, b=b, result=result)
+        text = template.format(a=a, b=b, result=result)
+        return ArithmeticRecord(text=text, op_type="mul", operand_a=a, operand_b=b, result=result)
 
-    def _generate_exponentiation(self) -> str | None:
+    def _generate_exponentiation(self) -> ArithmeticRecord | None:
         b = self.rng.randint(0, 15)
         if b == 0:
             a = self.rng.randint(1, 999)
@@ -113,9 +141,10 @@ class ArithmeticDataGenerator:
         if result > self.max_value:
             return None
         template = self.rng.choice(EXPONENTIATION_TEMPLATES)
-        return template.format(a=a, b=b, result=result)
+        text = template.format(a=a, b=b, result=result)
+        return ArithmeticRecord(text=text, op_type="exp", operand_a=a, operand_b=b, result=result)
 
-    def _generate_exact_division(self) -> str | None:
+    def _generate_exact_division(self) -> ArithmeticRecord | None:
         """Generate exact division (no remainder)."""
         b = self.rng.randint(1, 999)
         quotient = self.rng.randint(1, max(1, self.max_value // max(b, 1)))
@@ -123,10 +152,11 @@ class ArithmeticDataGenerator:
         if a > self.max_value:
             return None
         template = self.rng.choice(DIVISION_EXACT_TEMPLATES)
-        return template.format(a=a, b=b, result=quotient)
+        text = template.format(a=a, b=b, result=quotient)
+        return ArithmeticRecord(text=text, op_type="div", operand_a=a, operand_b=b, result=quotient)
 
     # ------------------------------------------------------------------
-    # Transcendental functions
+    # Transcendental functions (no integer operand metadata)
     # ------------------------------------------------------------------
 
     @staticmethod
@@ -134,21 +164,23 @@ class ArithmeticDataGenerator:
         """Format a float to a fixed number of decimal places."""
         return f"{x:.{decimals}f}"
 
-    def _generate_sine(self) -> str | None:
+    def _generate_sine(self) -> ArithmeticRecord | None:
         """Generate sin(x) = result with x in [0, 2*pi]."""
         x = self.rng.uniform(0, 2 * math.pi)
         result = math.sin(x)
         template = self.rng.choice(SINE_TEMPLATES)
-        return template.format(x=self._fmt_float(x), result=self._fmt_float(result))
+        text = template.format(x=self._fmt_float(x), result=self._fmt_float(result))
+        return ArithmeticRecord(text=text, op_type="sin")
 
-    def _generate_cosine(self) -> str | None:
+    def _generate_cosine(self) -> ArithmeticRecord | None:
         """Generate cos(x) = result with x in [0, 2*pi]."""
         x = self.rng.uniform(0, 2 * math.pi)
         result = math.cos(x)
         template = self.rng.choice(COSINE_TEMPLATES)
-        return template.format(x=self._fmt_float(x), result=self._fmt_float(result))
+        text = template.format(x=self._fmt_float(x), result=self._fmt_float(result))
+        return ArithmeticRecord(text=text, op_type="cos")
 
-    def _generate_tan(self) -> str | None:
+    def _generate_tan(self) -> ArithmeticRecord | None:
         """Generate tan(x) = result, avoiding near-singularities."""
         # Sample from safe regions (avoid pi/2 + n*pi)
         x = self.rng.uniform(-1.4, 1.4)  # within (-pi/2, pi/2)
@@ -156,33 +188,37 @@ class ArithmeticDataGenerator:
         if abs(result) > 1000:
             return None
         template = self.rng.choice(TAN_TEMPLATES)
-        return template.format(x=self._fmt_float(x), result=self._fmt_float(result))
+        text = template.format(x=self._fmt_float(x), result=self._fmt_float(result))
+        return ArithmeticRecord(text=text, op_type="tan")
 
-    def _generate_transcendental_exp(self) -> str | None:
+    def _generate_transcendental_exp(self) -> ArithmeticRecord | None:
         """Generate exp(x) = result with x in [-5, 20]."""
         x = self.rng.uniform(-5, 20)
         result = math.exp(x)
         if result > 1e9:
             return None
         template = self.rng.choice(TRANSCENDENTAL_EXP_TEMPLATES)
-        return template.format(x=self._fmt_float(x), result=self._fmt_float(result))
+        text = template.format(x=self._fmt_float(x), result=self._fmt_float(result))
+        return ArithmeticRecord(text=text, op_type="texp")
 
-    def _generate_ln(self) -> str | None:
+    def _generate_ln(self) -> ArithmeticRecord | None:
         """Generate ln(x) = result with x in (0, 10^6]."""
         x = self.rng.uniform(0.01, 1_000_000)
         result = math.log(x)
         template = self.rng.choice(LN_TEMPLATES)
-        return template.format(x=self._fmt_float(x), result=self._fmt_float(result))
+        text = template.format(x=self._fmt_float(x), result=self._fmt_float(result))
+        return ArithmeticRecord(text=text, op_type="ln")
 
-    def _generate_sqrt(self) -> str | None:
+    def _generate_sqrt(self) -> ArithmeticRecord | None:
         """Generate sqrt(x) = result with x in [0, 10^6]."""
         x = self.rng.uniform(0, 1_000_000)
         result = math.sqrt(x)
         template = self.rng.choice(SQRT_TEMPLATES)
-        return template.format(x=self._fmt_float(x), result=self._fmt_float(result))
+        text = template.format(x=self._fmt_float(x), result=self._fmt_float(result))
+        return ArithmeticRecord(text=text, op_type="sqrt")
 
     # ------------------------------------------------------------------
-    # Floating-point arithmetic
+    # Floating-point arithmetic (no integer operand metadata)
     # ------------------------------------------------------------------
 
     def _sample_float_operands(self) -> tuple[float, float]:
@@ -193,21 +229,23 @@ class ArithmeticDataGenerator:
         b = self.rng.randint(1, int(min(self.max_value, 999999) * scale)) / scale
         return round(a, decimals), round(b, decimals)
 
-    def _generate_float_addition(self) -> str | None:
+    def _generate_float_addition(self) -> ArithmeticRecord | None:
         a, b = self._sample_float_operands()
         result = a + b
         if abs(result) > self.max_value:
             return None
         template = self.rng.choice(FLOAT_ADDITION_TEMPLATES)
-        return template.format(a=a, b=b, result=self._fmt_float(result))
+        text = template.format(a=a, b=b, result=self._fmt_float(result))
+        return ArithmeticRecord(text=text, op_type="float_add")
 
-    def _generate_float_subtraction(self) -> str | None:
+    def _generate_float_subtraction(self) -> ArithmeticRecord | None:
         a, b = self._sample_float_operands()
         result = a - b
         template = self.rng.choice(FLOAT_SUBTRACTION_TEMPLATES)
-        return template.format(a=a, b=b, result=self._fmt_float(result))
+        text = template.format(a=a, b=b, result=self._fmt_float(result))
+        return ArithmeticRecord(text=text, op_type="float_sub")
 
-    def _generate_float_multiplication(self) -> str | None:
+    def _generate_float_multiplication(self) -> ArithmeticRecord | None:
         # Smaller operands to avoid overflow
         decimals = self.rng.randint(1, 4)
         scale = 10 ** decimals
@@ -218,9 +256,10 @@ class ArithmeticDataGenerator:
         if abs(result) > self.max_value:
             return None
         template = self.rng.choice(FLOAT_MULTIPLICATION_TEMPLATES)
-        return template.format(a=a, b=b, result=self._fmt_float(result))
+        text = template.format(a=a, b=b, result=self._fmt_float(result))
+        return ArithmeticRecord(text=text, op_type="float_mul")
 
-    def _generate_float_division(self) -> str | None:
+    def _generate_float_division(self) -> ArithmeticRecord | None:
         a, b = self._sample_float_operands()
         if b == 0:
             return None
@@ -228,7 +267,8 @@ class ArithmeticDataGenerator:
         if abs(result) > self.max_value:
             return None
         template = self.rng.choice(FLOAT_DIVISION_TEMPLATES)
-        return template.format(a=a, b=b, result=self._fmt_float(result))
+        text = template.format(a=a, b=b, result=self._fmt_float(result))
+        return ArithmeticRecord(text=text, op_type="float_div")
 
     # ------------------------------------------------------------------
     # Helpers for multi-step
@@ -246,10 +286,10 @@ class ArithmeticDataGenerator:
         return None
 
     # ------------------------------------------------------------------
-    # Multi-step: 2-step operation chains
+    # Multi-step: 2-step operation chains (no aux metadata for now)
     # ------------------------------------------------------------------
 
-    def _generate_multi_step_2(self) -> str | None:
+    def _generate_multi_step_2(self) -> ArithmeticRecord | None:
         """Generate a two-step arithmetic expression.
 
         Picks a random (op1, op2) combo, generates matching operands,
@@ -277,15 +317,16 @@ class ArithmeticDataGenerator:
         templates = MULTI_STEP_2_TEMPLATES[(op1, op2)]
         template = self.rng.choice(templates)
         try:
-            return template.format(a1=a1, b1=b1, r1=r1, b2=b2, result=result)
+            text = template.format(a1=a1, b1=b1, r1=r1, b2=b2, result=result)
         except (KeyError, IndexError):
             return None
+        return ArithmeticRecord(text=text, op_type="multi_step_2")
 
     # ------------------------------------------------------------------
-    # Multi-step: 3-step operation chains
+    # Multi-step: 3-step operation chains (no aux metadata for now)
     # ------------------------------------------------------------------
 
-    def _generate_multi_step_3(self) -> str | None:
+    def _generate_multi_step_3(self) -> ArithmeticRecord | None:
         """Generate a three-step arithmetic expression.
 
         Uses generic templates with operation symbols filled in to match
@@ -317,18 +358,19 @@ class ArithmeticDataGenerator:
 
         template = self.rng.choice(MULTI_STEP_3_GENERIC_TEMPLATES)
         try:
-            return template.format(
+            text = template.format(
                 a1=a1, b1=b1, r1=r1, b2=b2, r2=r2, b3=b3, result=result,
                 sym1=OP_SYMBOLS[op1], sym2=OP_SYMBOLS[op2], sym3=OP_SYMBOLS[op3],
             )
         except (KeyError, IndexError):
             return None
+        return ArithmeticRecord(text=text, op_type="multi_step_3")
 
     # ------------------------------------------------------------------
     # Edge cases
     # ------------------------------------------------------------------
 
-    def _generate_edge_case(self) -> str:
+    def _generate_edge_case(self) -> ArithmeticRecord:
         """Generate edge case examples."""
         case_type = self.rng.choice([
             "zero_add", "zero_mul", "identity_mul", "self_sub",
@@ -345,77 +387,93 @@ class ArithmeticDataGenerator:
         if case_type == "zero_add":
             a = self.rng.randint(0, self.max_value)
             template = self.rng.choice(ADDITION_TEMPLATES)
-            return template.format(a=a, b=0, result=a)
+            text = template.format(a=a, b=0, result=a)
+            return ArithmeticRecord(text=text, op_type="edge", operand_a=a, operand_b=0, result=a)
         elif case_type == "zero_mul":
             a = self.rng.randint(0, self.max_value)
             template = self.rng.choice(MULTIPLICATION_TEMPLATES)
-            return template.format(a=a, b=0, result=0)
+            text = template.format(a=a, b=0, result=0)
+            return ArithmeticRecord(text=text, op_type="edge", operand_a=a, operand_b=0, result=0)
         elif case_type == "identity_mul":
             a = self.rng.randint(0, self.max_value)
             template = self.rng.choice(MULTIPLICATION_TEMPLATES)
-            return template.format(a=a, b=1, result=a)
+            text = template.format(a=a, b=1, result=a)
+            return ArithmeticRecord(text=text, op_type="edge", operand_a=a, operand_b=1, result=a)
         elif case_type == "self_sub":
             a = self.rng.randint(0, self.max_value)
             template = self.rng.choice(SUBTRACTION_TEMPLATES)
-            return template.format(a=a, b=a, result=0)
+            text = template.format(a=a, b=a, result=0)
+            return ArithmeticRecord(text=text, op_type="edge", operand_a=a, operand_b=a, result=0)
         elif case_type == "power_zero":
             a = self.rng.randint(1, 999)
             template = self.rng.choice(EXPONENTIATION_TEMPLATES)
-            return template.format(a=a, b=0, result=1)
+            text = template.format(a=a, b=0, result=1)
+            return ArithmeticRecord(text=text, op_type="edge", operand_a=a, operand_b=0, result=1)
         elif case_type == "power_one":
             a = self.rng.randint(1, 999)
             template = self.rng.choice(EXPONENTIATION_TEMPLATES)
-            return template.format(a=a, b=1, result=a)
+            text = template.format(a=a, b=1, result=a)
+            return ArithmeticRecord(text=text, op_type="edge", operand_a=a, operand_b=1, result=a)
         elif case_type == "square":
             a = self.rng.randint(1, 31622)  # sqrt(10^9) ~ 31622
             template = self.rng.choice(EXPONENTIATION_TEMPLATES)
-            return template.format(a=a, b=2, result=a * a)
+            text = template.format(a=a, b=2, result=a * a)
+            return ArithmeticRecord(text=text, op_type="edge", operand_a=a, operand_b=2, result=a * a)
         elif case_type == "cube":
             a = self.rng.randint(1, 999)  # cbrt(10^9) ~ 999
             template = self.rng.choice(EXPONENTIATION_TEMPLATES)
-            return template.format(a=a, b=3, result=a * a * a)
+            text = template.format(a=a, b=3, result=a * a * a)
+            return ArithmeticRecord(text=text, op_type="edge", operand_a=a, operand_b=3, result=a * a * a)
         elif case_type == "small_add":
             a = self.rng.randint(0, 9)
             b = self.rng.randint(0, 9)
             template = self.rng.choice(ADDITION_TEMPLATES)
-            return template.format(a=a, b=b, result=a + b)
+            text = template.format(a=a, b=b, result=a + b)
+            return ArithmeticRecord(text=text, op_type="edge", operand_a=a, operand_b=b, result=a + b)
         elif case_type == "one_digit_all_ops":
             a = self.rng.randint(1, 9)
             b = self.rng.randint(1, 9)
             op = self.rng.choice(["add", "sub", "mul"])
             if op == "add":
                 template = self.rng.choice(ADDITION_TEMPLATES)
-                return template.format(a=a, b=b, result=a + b)
+                r = a + b
             elif op == "sub":
                 template = self.rng.choice(SUBTRACTION_TEMPLATES)
-                return template.format(a=a, b=b, result=a - b)
+                r = a - b
             else:
                 template = self.rng.choice(MULTIPLICATION_TEMPLATES)
-                return template.format(a=a, b=b, result=a * b)
+                r = a * b
+            text = template.format(a=a, b=b, result=r)
+            return ArithmeticRecord(text=text, op_type="edge", operand_a=a, operand_b=b, result=r)
         elif case_type == "double_zero":
             template = self.rng.choice(ADDITION_TEMPLATES)
-            return template.format(a=0, b=0, result=0)
+            text = template.format(a=0, b=0, result=0)
+            return ArithmeticRecord(text=text, op_type="edge", operand_a=0, operand_b=0, result=0)
         elif case_type == "large_identity":
             a = self.max_value - self.rng.randint(0, 1000)
             template = self.rng.choice(MULTIPLICATION_TEMPLATES)
-            return template.format(a=a, b=1, result=a)
+            text = template.format(a=a, b=1, result=a)
+            return ArithmeticRecord(text=text, op_type="edge", operand_a=a, operand_b=1, result=a)
         elif case_type == "boundary_add":
             a = self.max_value - self.rng.randint(1, 1000)
             b = self.rng.randint(1, 999)
             if a + b <= self.max_value:
                 template = self.rng.choice(ADDITION_TEMPLATES)
-                return template.format(a=a, b=b, result=a + b)
+                text = template.format(a=a, b=b, result=a + b)
+                return ArithmeticRecord(text=text, op_type="edge", operand_a=a, operand_b=b, result=a + b)
             return self._generate_edge_case()
         elif case_type == "negative_result":
             b = self.rng.randint(1, 999)
             a = self.rng.randint(0, b - 1)
             template = self.rng.choice(SUBTRACTION_TEMPLATES)
-            return template.format(a=a, b=b, result=a - b)
+            text = template.format(a=a, b=b, result=a - b)
+            return ArithmeticRecord(text=text, op_type="edge", operand_a=a, operand_b=b, result=a - b)
         elif case_type == "consecutive_add":
             n = self.rng.randint(0, self.max_value // 2 - 1)
             a, b = n, n + 1
             template = self.rng.choice(ADDITION_TEMPLATES)
-            return template.format(a=a, b=b, result=a + b)
+            text = template.format(a=a, b=b, result=a + b)
+            return ArithmeticRecord(text=text, op_type="edge", operand_a=a, operand_b=b, result=a + b)
         elif case_type == "near_overflow_mul":
             # Product barely under max_value
             b = self.rng.randint(2, 999)
@@ -424,74 +482,90 @@ class ArithmeticDataGenerator:
             result = a * b
             if result <= self.max_value:
                 template = self.rng.choice(MULTIPLICATION_TEMPLATES)
-                return template.format(a=a, b=b, result=result)
+                text = template.format(a=a, b=b, result=result)
+                return ArithmeticRecord(text=text, op_type="edge", operand_a=a, operand_b=b, result=result)
             return self._generate_edge_case()
         elif case_type == "power_two":
             n = self.rng.randint(0, 29)  # 2^29 < 10^9
             result = 2 ** n
             template = self.rng.choice(EXPONENTIATION_TEMPLATES)
-            return template.format(a=2, b=n, result=result)
+            text = template.format(a=2, b=n, result=result)
+            return ArithmeticRecord(text=text, op_type="edge", operand_a=2, operand_b=n, result=result)
         elif case_type == "small_mul":
             a = self.rng.randint(1, 9)
             b = self.rng.randint(1, 9)
             template = self.rng.choice(MULTIPLICATION_TEMPLATES)
-            return template.format(a=a, b=b, result=a * b)
+            text = template.format(a=a, b=b, result=a * b)
+            return ArithmeticRecord(text=text, op_type="edge", operand_a=a, operand_b=b, result=a * b)
         elif case_type == "commutative_pair":
             a = self.rng.randint(1, 999)
             b = self.rng.randint(1, 999)
             result = a + b
             if result <= self.max_value:
                 template = self.rng.choice(ADDITION_TEMPLATES)
-                return template.format(a=b, b=a, result=result)
+                text = template.format(a=b, b=a, result=result)
+                return ArithmeticRecord(text=text, op_type="edge", operand_a=b, operand_b=a, result=result)
             return self._generate_edge_case()
         elif case_type == "large_sub_to_zero":
             a = self.rng.randint(1000, self.max_value)
             b = a - self.rng.randint(0, 9)
             template = self.rng.choice(SUBTRACTION_TEMPLATES)
-            return template.format(a=a, b=b, result=a - b)
+            text = template.format(a=a, b=b, result=a - b)
+            return ArithmeticRecord(text=text, op_type="edge", operand_a=a, operand_b=b, result=a - b)
         elif case_type == "divide_by_one":
             a = self.rng.randint(1, self.max_value)
             template = self.rng.choice(DIVISION_EXACT_TEMPLATES)
-            return template.format(a=a, b=1, result=a)
+            text = template.format(a=a, b=1, result=a)
+            return ArithmeticRecord(text=text, op_type="edge", operand_a=a, operand_b=1, result=a)
         elif case_type == "divide_self":
             a = self.rng.randint(1, self.max_value)
             template = self.rng.choice(DIVISION_EXACT_TEMPLATES)
-            return template.format(a=a, b=a, result=1)
+            text = template.format(a=a, b=a, result=1)
+            return ArithmeticRecord(text=text, op_type="edge", operand_a=a, operand_b=a, result=1)
         elif case_type == "sin_zero":
             template = self.rng.choice(SINE_TEMPLATES)
-            return template.format(x="0.000000", result="0.000000")
+            text = template.format(x="0.000000", result="0.000000")
+            return ArithmeticRecord(text=text, op_type="edge")
         elif case_type == "cos_zero":
             template = self.rng.choice(COSINE_TEMPLATES)
-            return template.format(x="0.000000", result="1.000000")
+            text = template.format(x="0.000000", result="1.000000")
+            return ArithmeticRecord(text=text, op_type="edge")
         elif case_type == "sin_pi_half":
             template = self.rng.choice(SINE_TEMPLATES)
-            return template.format(x=self._fmt_float(math.pi / 2), result="1.000000")
+            text = template.format(x=self._fmt_float(math.pi / 2), result="1.000000")
+            return ArithmeticRecord(text=text, op_type="edge")
         elif case_type == "cos_pi":
             template = self.rng.choice(COSINE_TEMPLATES)
-            return template.format(x=self._fmt_float(math.pi), result="-1.000000")
+            text = template.format(x=self._fmt_float(math.pi), result="-1.000000")
+            return ArithmeticRecord(text=text, op_type="edge")
         elif case_type == "exp_zero":
             template = self.rng.choice(TRANSCENDENTAL_EXP_TEMPLATES)
-            return template.format(x="0.000000", result="1.000000")
+            text = template.format(x="0.000000", result="1.000000")
+            return ArithmeticRecord(text=text, op_type="edge")
         elif case_type == "ln_one":
             template = self.rng.choice(LN_TEMPLATES)
-            return template.format(x="1.000000", result="0.000000")
+            text = template.format(x="1.000000", result="0.000000")
+            return ArithmeticRecord(text=text, op_type="edge")
         elif case_type == "sqrt_zero":
             template = self.rng.choice(SQRT_TEMPLATES)
-            return template.format(x="0.000000", result="0.000000")
+            text = template.format(x="0.000000", result="0.000000")
+            return ArithmeticRecord(text=text, op_type="edge")
         elif case_type == "sqrt_one":
             template = self.rng.choice(SQRT_TEMPLATES)
-            return template.format(x="1.000000", result="1.000000")
+            text = template.format(x="1.000000", result="1.000000")
+            return ArithmeticRecord(text=text, op_type="edge")
         else:  # square_root_exact
             a = self.rng.randint(1, 31622)  # sqrt(10^9) ~ 31622
             product = a * a
             template = self.rng.choice(MULTIPLICATION_TEMPLATES)
-            return template.format(a=a, b=a, result=product)
+            text = template.format(a=a, b=a, result=product)
+            return ArithmeticRecord(text=text, op_type="edge", operand_a=a, operand_b=a, result=product)
 
     # ------------------------------------------------------------------
     # Top-level generation
     # ------------------------------------------------------------------
 
-    def _generate_positive_example(self) -> str | None:
+    def _generate_positive_example(self) -> ArithmeticRecord | None:
         """Generate one positive arithmetic example."""
         # Multi-step gets 2x weight; transcendentals and floats each get 1x
         op = self.rng.choice([
@@ -521,9 +595,9 @@ class ArithmeticDataGenerator:
         }
         return generators[op]()
 
-    def generate_dataset(self) -> list[str]:
+    def generate_dataset(self) -> list[ArithmeticRecord]:
         """Generate the complete training dataset."""
-        examples: list[str] = []
+        examples: list[ArithmeticRecord] = []
 
         # Positive examples
         attempts = 0
@@ -536,7 +610,8 @@ class ArithmeticDataGenerator:
 
         # Negative examples
         negatives = self.negative_sampler.sample(self.config.num_negative)
-        examples.extend(negatives)
+        for text in negatives:
+            examples.append(ArithmeticRecord(text=text, op_type="negative"))
 
         # Edge cases
         for _ in range(self.config.num_edge_cases):
@@ -545,14 +620,16 @@ class ArithmeticDataGenerator:
         self.rng.shuffle(examples)
         return examples
 
-    def save_dataset(self, examples: list[str], output_dir: str | Path) -> Path:
-        """Save dataset as JSONL file."""
+    def save_dataset(
+        self, examples: list[ArithmeticRecord], output_dir: str | Path
+    ) -> Path:
+        """Save dataset as JSONL file with metadata."""
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
         output_path = output_dir / "train.jsonl"
 
         with open(output_path, "w") as f:
-            for ex in examples:
-                f.write(json.dumps({"text": ex}) + "\n")
+            for rec in examples:
+                f.write(json.dumps(rec.to_dict()) + "\n")
 
         return output_path

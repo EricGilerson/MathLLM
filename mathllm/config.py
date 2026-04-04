@@ -22,6 +22,7 @@ class ARBConfig:
     num_results: int = 5  # add, sub, mul, exp, div
     dropout: float = 0.1  # dropout on extraction and injection layers
     injector_init_std: float = 1e-3  # small non-zero init so gradients reach extraction
+    gate_init_logit: float = -2.0  # sigmoid(-2) ~ 0.12; learnable injection gate start
 
 
 @dataclass
@@ -52,10 +53,16 @@ class TrainingConfig:
     final_model_dir: str = "trained_model/"
     auto_resume_latest: bool = True
     device: str = "auto"
-    answer_only_loss: bool = True  # train arithmetic examples mainly on answer tokens
+    answer_only_loss: bool = False  # full next-token loss for richer gradients
     early_stopping_patience: int = 3  # stop if eval loss doesn't improve for N evals
     max_eval_batches: int = 0  # cap eval batches per evaluation (0 = no cap)
     eval_batch_size: int = 0  # eval DataLoader batch size (0 = 2x batch_size)
+    # Phased training
+    phase1_epochs: int = 3  # extraction-only training
+    phase2_epochs: int = 4  # extraction + injection, aux loss active
+    phase3_epochs: int = 3  # end-to-end, aux loss decayed
+    aux_loss_weight: float = 1.0  # lambda for auxiliary extraction loss
+    aux_loss_decay: float = 0.1  # multiplier for aux weight in phase 3
 
 
 @dataclass

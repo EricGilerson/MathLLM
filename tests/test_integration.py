@@ -33,8 +33,15 @@ class TestModelIntegration:
         outputs = model(input_ids=input_ids, labels=labels)
         assert "logits" in outputs
         assert "loss" in outputs
+        assert "arb_extractions" in outputs
         assert outputs["logits"].shape == (1, 5, 50257)  # GPT-2 vocab size
         assert outputs["loss"].item() > 0
+        # Check extraction outputs from each ARB layer
+        for pos in config.arb.layer_positions:
+            assert pos in outputs["arb_extractions"]
+            d_a, d_b = outputs["arb_extractions"][pos]
+            assert d_a.shape == (1, 5, config.rns.num_digit_slots)
+            assert d_b.shape == (1, 5, config.rns.num_digit_slots)
 
     def test_zero_init_matches_base(self, config):
         """With zero W_proj, output should match unmodified GPT-2."""

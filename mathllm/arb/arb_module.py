@@ -39,6 +39,7 @@ class ArithmeticResidualBlock(nn.Module):
         softmax_temperature: float = 1000.0,
         dropout: float = 0.1,
         injector_init_std: float = 1e-3,
+        gate_init_logit: float = -2.0,
     ):
         super().__init__()
         self.hidden_dim = hidden_dim
@@ -69,6 +70,7 @@ class ArithmeticResidualBlock(nn.Module):
             total_result_dim,
             dropout=dropout,
             init_std=injector_init_std,
+            gate_init_logit=gate_init_logit,
         )
 
         # Freeze stages 2 and 3
@@ -77,7 +79,7 @@ class ArithmeticResidualBlock(nn.Module):
         for param in self.compute.parameters():
             param.requires_grad = False
 
-    def forward(self, h: Tensor) -> Tensor:
+    def forward(self, h: Tensor) -> tuple[Tensor, Tensor, Tensor]:
         """Run the full ARB on the hidden state.
 
         Args:
@@ -85,6 +87,8 @@ class ArithmeticResidualBlock(nn.Module):
 
         Returns:
             h': [batch, seq_len, hidden_dim] — h + delta_h from arithmetic
+            d_a: [batch, seq_len, num_digits] — extracted digit vector for operand A
+            d_b: [batch, seq_len, num_digits] — extracted digit vector for operand B
         """
         # Stage 1: Extract operand digit vectors
         d_a, d_b = self.extract(h)
@@ -99,7 +103,8 @@ class ArithmeticResidualBlock(nn.Module):
         results = self.compute(a_circle, b_circle, b_exp_circle)
 
         # Stage 4: Inject into hidden state with residual connection
-        return self.inject(results, h)
+        h_prime = self.inject(results, h)
+        return h_prime, d_a, d_b
 
     def count_parameters(self) -> dict[str, int]:
         """Count learned vs frozen parameters."""

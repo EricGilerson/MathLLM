@@ -98,6 +98,33 @@ def test_non_arithmetic_examples_keep_full_loss():
     assert torch.equal(item["labels"][valid], item["input_ids"][valid])
 
 
+def test_dataset_returns_aux_targets():
+    tokenizer = CharTokenizer()
+    ds = ArithmeticDataset(
+        examples=[
+            {"text": "5 + 3 = 8", "op_type": "add", "operand_a": 5, "operand_b": 3, "result": 8},
+            {"text": "The year is 2024.", "op_type": "negative"},
+        ],
+        tokenizer=tokenizer,
+        max_length=32,
+    )
+
+    item0 = ds[0]
+    assert "digits_a" in item0
+    assert "digits_b" in item0
+    assert "has_aux" in item0
+    assert item0["digits_a"].shape == (10,)
+    assert item0["has_aux"].item() is True
+    # 5 -> [5, 0, 0, 0, 0, 0, 0, 0, 0, 0] (LSB first)
+    assert item0["digits_a"][0].item() == 5
+    assert item0["digits_a"][1].item() == 0
+    # 3 -> [3, 0, 0, 0, ...]
+    assert item0["digits_b"][0].item() == 3
+
+    item1 = ds[1]
+    assert item1["has_aux"].item() is False
+
+
 def test_explicit_target_start_overrides_inference():
     tokenizer = CharTokenizer()
     text = "Answer: 100977"

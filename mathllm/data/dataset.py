@@ -41,22 +41,46 @@ def _infer_target_start(text: str) -> int | None:
     return matches[-1].start()
 
 
+def _int_to_digits(n: int | None, num_digits: int = 10) -> list[int]:
+    """Decompose integer to base-10 digit vector, LSB-first, zero-padded."""
+    if n is None:
+        return [0] * num_digits
+    n = abs(n)
+    return [(n // 10**k) % 10 for k in range(num_digits)]
+
+
 def _normalize_example(
     raw: str | dict[str, Any],
     *,
     answer_only_loss: bool,
 ) -> dict[str, Any]:
     """Normalize legacy and structured example records."""
+    # Handle ArithmeticRecord dataclass objects
+    if hasattr(raw, "to_dict"):
+        raw = raw.to_dict()
+
     if isinstance(raw, str):
         text = raw
         target_start = _infer_target_start(text) if answer_only_loss else None
-        return {"text": text, "target_start": target_start}
+        return {
+            "text": text,
+            "target_start": target_start,
+            "operand_a": None,
+            "operand_b": None,
+            "op_type": "unknown",
+        }
 
     text = str(raw["text"])
     target_start = raw.get("target_start")
     if target_start is None and answer_only_loss:
         target_start = _infer_target_start(text)
-    return {"text": text, "target_start": target_start}
+    return {
+        "text": text,
+        "target_start": target_start,
+        "operand_a": raw.get("operand_a"),
+        "operand_b": raw.get("operand_b"),
+        "op_type": raw.get("op_type", "unknown"),
+    }
 
 
 def _augment_text(text: str, rng: random.Random) -> str:
@@ -130,7 +154,8 @@ class ArithmeticDataset(Dataset):
         max_length: int = 128,
         augment: bool = False,
         seed: int = 42,
-        answer_only_loss: bool = True,
+        answer_only_loss: bool = False,
+        num_digits: int = 10,
     ):
         """
         Args:
@@ -140,6 +165,7 @@ class ArithmeticDataset(Dataset):
             max_length: Maximum sequence length for tokenization
             augment: Apply random formatting augmentations at access time
             seed: Random seed for augmentation
+            num_digits: Number of digit slots for auxiliary targets
         """
         if examples is None and jsonl_path is not None:
             examples = self._load_jsonl(jsonl_path)
@@ -152,11 +178,15 @@ class ArithmeticDataset(Dataset):
         self.augment = augment
         self.aug_rng = random.Random(seed)
         self.answer_only_loss = answer_only_loss
+        self.num_digits = num_digits
         self.records = [
             _normalize_example(example, answer_only_loss=answer_only_loss)
             for example in self.examples
         ]
         self.examples = [record["text"] for record in self.records]
+
+        # Pre-compute auxiliary digit vectors for extraction loss
+        self._build_aux_targets()
 
         # Tokenize all examples upfront for efficiency (when not augmenting)
         if tokenizer is not None and not augment:
@@ -167,6 +197,25 @@ class ArithmeticDataset(Dataset):
                 # Ensure pad token exists for per-item tokenization
                 if self.tokenizer.pad_token is None:
                     self.tokenizer.pad_token = self.tokenizer.eos_token
+
+    def _build_aux_targets(self) -> None:
+        """Pre-compute ground-truth digit vectors for auxiliary extraction loss."""
+        n = len(self.records)
+        self.digits_a = torch.zeros(n, self.num_digits, dtype=torch.float32)
+        self.digits_b = torch.zeros(n, self.num_digits, dtype=torch.float32)
+        self.has_aux = torch.zeros(n, dtype=torch.bool)
+
+        for i, rec in enumerate(self.records):
+            op_a = rec.get("operand_a")
+            op_b = rec.get("operand_b")
+            if op_a is not None and op_b is not None:
+                self.digits_a[i] = torch.tensor(
+                    _int_to_digits(op_a, self.num_digits), dtype=torch.float32
+                )
+                self.digits_b[i] = torch.tensor(
+                    _int_to_digits(op_b, self.num_digits), dtype=torch.float32
+                )
+                self.has_aux[i] = True
 
     @staticmethod
     def _load_jsonl(path: str | Path) -> list[dict[str, Any]]:
@@ -261,6 +310,9 @@ class ArithmeticDataset(Dataset):
             "input_ids": input_ids,
             "attention_mask": attention_mask,
             "labels": labels,
+            "digits_a": self.digits_a[idx],
+            "digits_b": self.digits_b[idx],
+            "has_aux": self.has_aux[idx],
         }
 
     def split(self, train_ratio: float = 0.9) -> tuple["ArithmeticDataset", "ArithmeticDataset"]:
@@ -274,6 +326,7 @@ class ArithmeticDataset(Dataset):
             max_length=self.max_length,
             augment=self.augment,
             answer_only_loss=self.answer_only_loss,
+            num_digits=self.num_digits,
         )
         # Never augment eval data — we want deterministic evaluation
         eval_ds = ArithmeticDataset(
@@ -282,5 +335,6 @@ class ArithmeticDataset(Dataset):
             max_length=self.max_length,
             augment=False,
             answer_only_loss=self.answer_only_loss,
+            num_digits=self.num_digits,
         )
         return train_ds, eval_ds

@@ -72,7 +72,8 @@ class ARBTrainer:
         self.eval_loader = eval_loader
         self.device = device or torch.device("cpu")
 
-        self.steps_per_epoch = len(train_loader)
+        self.accumulation_steps = max(config.gradient_accumulation_steps, 1)
+        self.steps_per_epoch = len(train_loader) // self.accumulation_steps
         self.total_training_steps = self.steps_per_epoch * config.max_epochs
 
         self.global_step = 0
@@ -430,31 +431,52 @@ class ARBTrainer:
             and self.global_step < step_limit
             and self.global_step < self.total_training_steps
         ):
-            try:
-                batch = next(train_iter)
-            except StopIteration:
+            # --- Gradient accumulation loop ---
+            step_loss = 0.0
+            step_lm = 0.0
+            step_aux = 0.0
+            micro_counted = 0
+            for _micro in range(self.accumulation_steps):
+                try:
+                    batch = next(train_iter)
+                except StopIteration:
+                    break
+
+                batch = {key: value.to(self.device) for key, value in batch.items()}
+
+                with self._autocast_context():
+                    outputs = self.model(
+                        input_ids=batch["input_ids"],
+                        attention_mask=batch["attention_mask"],
+                        labels=batch["labels"],
+                    )
+                    loss, lm_val, aux_val = self._compute_loss(outputs, batch, phase)
+
+                scaled_loss = loss / self.accumulation_steps
+                if scaled_loss.requires_grad:
+                    scaled_loss.backward()
+
+                step_loss += loss.item()
+                step_lm += lm_val
+                step_aux += aux_val
+                micro_counted += 1
+
+            if micro_counted == 0:
                 break
 
-            batch = {key: value.to(self.device) for key, value in batch.items()}
-
-            with self._autocast_context():
-                outputs = self.model(
-                    input_ids=batch["input_ids"],
-                    attention_mask=batch["attention_mask"],
-                    labels=batch["labels"],
-                )
-                loss, lm_val, aux_val = self._compute_loss(outputs, batch, phase)
+            # Average over actual micro-batches (handles incomplete final accumulation)
+            step_loss /= micro_counted
+            step_lm /= micro_counted
+            step_aux /= micro_counted
 
             lr = self._set_learning_rate(self.global_step + 1)
-            if loss.requires_grad:
-                loss.backward()
-                torch.nn.utils.clip_grad_norm_(self.arb_params, self.config.grad_clip)
+            torch.nn.utils.clip_grad_norm_(self.arb_params, self.config.grad_clip)
             self.optimizer.step()
             self.optimizer.zero_grad(set_to_none=True)
 
-            total_loss += loss.item()
-            total_lm_loss += lm_val
-            total_aux_loss += aux_val
+            total_loss += step_loss
+            total_lm_loss += step_lm
+            total_aux_loss += step_aux
             num_batches += 1
             self.global_step += 1
             self.batches_completed_in_epoch += 1

@@ -46,6 +46,7 @@ class TrainingConfig:
     checkpoint_every_steps: int = 0
     max_seq_len: int = 128
     warmup_steps: int = 500
+    gradient_accumulation_steps: int = 1
     grad_clip: float = 1.0
     log_every: int = 100
     eval_every: int = 1000

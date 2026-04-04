@@ -123,6 +123,11 @@ class ARBTrainer:
                 for p in arb.inject.parameters():
                     p.requires_grad = True
 
+        # Reset early stopping on phase transitions — flat Phase 1 eval
+        # should not count against Phase 2's patience budget.
+        self.patience_counter = 0
+        self.best_eval_loss = float("inf")
+
         self._build_optimizer()
         logger.info(
             "Phase transition: %s -> %s (trainable params: %s)",
@@ -349,7 +354,8 @@ class ARBTrainer:
                 break
 
             epoch_loss_value = epoch_loss if epoch_loss is not None else 0.0
-            if self.eval_loader is not None:
+            if self.eval_loader is not None and phase > 1:
+                # LM evaluation is only meaningful when injection is active (Phase 2+)
                 eval_loss = self._evaluate()
                 history["eval_loss"].append(eval_loss)
                 epoch_bar.set_postfix(loss=f"{epoch_loss_value:.4f}", eval=f"{eval_loss:.4f}", phase=phase)
@@ -367,6 +373,10 @@ class ARBTrainer:
                         f"no improvement for {self.config.early_stopping_patience} evals"
                     )
                     self.early_stopped = True
+            elif self.eval_loader is not None and phase == 1:
+                # Phase 1: evaluate extraction quality only (no early stopping)
+                aux_eval = self._evaluate_extraction()
+                epoch_bar.set_postfix(loss=f"{epoch_loss_value:.4f}", aux_eval=f"{aux_eval:.4f}", phase=phase)
 
             self._save_checkpoint(f"epoch_{epoch + 1}")
 
@@ -475,6 +485,7 @@ class ARBTrainer:
                 self.eval_loader is not None
                 and self.config.eval_every > 0
                 and self.global_step % self.config.eval_every == 0
+                and phase > 1  # LM eval meaningless in Phase 1
             ):
                 eval_loss = self._evaluate()
                 history["eval_loss"].append(eval_loss)
@@ -529,6 +540,37 @@ class ARBTrainer:
         eval_bar.close()
         return (total_loss / max(num_batches, 1)).item()
 
+    @torch.no_grad()
+    def _evaluate_extraction(self) -> float:
+        """Evaluate auxiliary extraction loss on the eval set (Phase 1 metric)."""
+        self.model.eval()
+        total_aux = 0.0
+        num_batches = 0
+        max_batches = self.config.max_eval_batches or len(self.eval_loader)
+
+        with self._autocast_context():
+            for batch in self.eval_loader:
+                if num_batches >= max_batches:
+                    break
+                batch = {key: value.to(self.device) for key, value in batch.items()}
+                outputs = self.model(
+                    input_ids=batch["input_ids"],
+                    attention_mask=batch["attention_mask"],
+                    labels=batch["labels"],
+                )
+                aux_loss = compute_extraction_loss(
+                    arb_extractions=outputs.get("arb_extractions", {}),
+                    gt_digits_a=batch["digits_a"],
+                    gt_digits_b=batch["digits_b"],
+                    has_aux=batch["has_aux"],
+                    attention_mask=batch["attention_mask"],
+                )
+                total_aux += aux_loss.item()
+                num_batches += 1
+
+        self.model.train()
+        return total_aux / max(num_batches, 1)
+
     # ------------------------------------------------------------------
     # Checkpointing
     # ------------------------------------------------------------------
@@ -580,8 +622,6 @@ class ARBTrainer:
             self.completed_epochs = self.global_step // max(saved_steps_per_epoch, 1)
             self.batches_completed_in_epoch = self.global_step % max(saved_steps_per_epoch, 1)
 
-        self.best_eval_loss = ckpt.get("best_eval_loss", float("inf"))
-        self.patience_counter = ckpt.get("patience_counter", 0)
         self._restore_rng_state(ckpt.get("rng_state"))
 
         # Restore phase and rebuild optimizer before loading optimizer state
@@ -589,6 +629,10 @@ class ARBTrainer:
         if saved_phase > 0:
             self._current_phase = 0  # force reconfigure
             self._configure_phase(saved_phase)
+
+        # Restore early stopping state AFTER phase config (which resets them)
+        self.best_eval_loss = ckpt.get("best_eval_loss", float("inf"))
+        self.patience_counter = ckpt.get("patience_counter", 0)
 
         # Load optimizer state after rebuilding with correct param groups
         try:

@@ -25,10 +25,10 @@ training:
   lr: 3.0e-4
   weight_decay: 0.01
   batch_size: 4
-  max_epochs: 2
+  max_epochs: 10
   checkpoint_every_steps: 0
   max_seq_len: 64
-  warmup_steps: 50
+  warmup_steps: 5
   grad_clip: 1.0
   log_every: 10
   eval_every: 100
@@ -39,9 +39,9 @@ training:
   answer_only_loss: false
   early_stopping_patience: 3
   max_eval_batches: 10
-  phase1_epochs: 1
-  phase2_epochs: 1
-  phase3_epochs: 0
+  phase1_epochs: 5
+  phase2_epochs: 3
+  phase3_epochs: 2
   aux_loss_weight: 1.0
   aux_loss_decay: 0.1
   phase1_aux_only: true

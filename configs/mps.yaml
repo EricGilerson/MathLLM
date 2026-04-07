@@ -23,7 +23,7 @@ training:
   base_model: "gpt2"
   lr: 3.0e-4
   weight_decay: 0.01
-  batch_size: 32
+  batch_size: 16
   max_epochs: 10
   checkpoint_every_steps: 0
   max_seq_len: 128

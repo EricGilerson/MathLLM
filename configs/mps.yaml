@@ -24,7 +24,6 @@ training:
   lr: 3.0e-4
   weight_decay: 0.01
   batch_size: 32
-  gradient_accumulation_steps: 16  # effective batch size = 512
   max_epochs: 10
   checkpoint_every_steps: 0
   max_seq_len: 128

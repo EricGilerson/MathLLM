@@ -110,19 +110,23 @@ class ARBTrainer:
         self._current_phase = phase
 
         if phase == 1:
-            # Extraction only: freeze injection
+            # Extraction only: freeze injection, disable extraction dropout
             for arb in self.model.arbs.values():
                 for p in arb.extract.parameters():
                     p.requires_grad = True
                 for p in arb.inject.parameters():
                     p.requires_grad = False
+                # Phase 1 is precision regression — dropout adds noise
+                arb.extract.dropout.p = 0.0
         else:
-            # Phase 2 & 3: everything trainable
+            # Phase 2 & 3: everything trainable, restore dropout
             for arb in self.model.arbs.values():
                 for p in arb.extract.parameters():
                     p.requires_grad = True
                 for p in arb.inject.parameters():
                     p.requires_grad = True
+                # Restore configured dropout for generalization
+                arb.extract.dropout.p = self.model.config.arb.dropout
 
         # Reset early stopping on phase transitions — flat Phase 1 eval
         # should not count against Phase 2's patience budget.

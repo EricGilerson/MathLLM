@@ -42,6 +42,7 @@ class _DummySubModule(nn.Module):
     """Placeholder submodule for extract/inject."""
     def __init__(self):
         super().__init__()
+        self.dropout = nn.Dropout(0.1)
 
 
 class DummyARB(nn.Module):
@@ -60,6 +61,8 @@ class DummyModel(nn.Module):
     def __init__(self):
         super().__init__()
         self.arbs = nn.ModuleDict({"layer_0": DummyARB()})
+        # Provide config.arb.dropout for phase dropout control
+        self.config = _SimpleNamespace(arb=_SimpleNamespace(dropout=0.1))
 
     def get_trainable_parameters(self):
         return list(self.arbs.parameters())
@@ -71,6 +74,12 @@ class DummyModel(nn.Module):
         mask = attention_mask.float()
         loss = (((prediction - target) ** 2) * mask).mean()
         return {"loss": loss, "arb_extractions": {}}
+
+
+class _SimpleNamespace:
+    """Minimal namespace for test config attributes."""
+    def __init__(self, **kwargs):
+        self.__dict__.update(kwargs)
 
 
 def make_config(checkpoint_dir: str) -> TrainingConfig:

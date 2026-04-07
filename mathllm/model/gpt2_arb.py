@@ -159,8 +159,8 @@ class GPT2WithARB(nn.Module):
 
             # Insert ARB after this layer if configured
             if i in self.arb_positions:
-                hidden_states, d_a, d_b = self.arbs[str(i)](hidden_states)
-                arb_extractions[i] = (d_a, d_b)
+                hidden_states, d_a, d_b, d_a_cont, d_b_cont = self.arbs[str(i)](hidden_states)
+                arb_extractions[i] = (d_a_cont, d_b_cont)  # continuous for smooth aux loss
 
         # Final layer norm
         hidden_states = transformer.ln_f(hidden_states)

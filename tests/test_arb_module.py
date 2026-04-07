@@ -10,7 +10,7 @@ class TestARBModule:
     def test_output_shape(self):
         arb = ArithmeticResidualBlock(hidden_dim=64, primes=DEFAULT_PRIMES)
         h = torch.randn(2, 5, 64)
-        h_out, d_a, d_b = arb(h)
+        h_out, d_a, d_b, _, _ = arb(h)
         assert h_out.shape == (2, 5, 64)
         assert d_a.shape == (2, 5, 10)
         assert d_b.shape == (2, 5, 10)
@@ -24,7 +24,7 @@ class TestARBModule:
             gate_init_logit=-100.0,  # sigmoid(-100) ~ 0
         )
         h = torch.randn(2, 5, 64)
-        h_out, _, _ = arb(h)
+        h_out, _, _, _, _ = arb(h)
         assert torch.allclose(h_out, h, atol=1e-6), \
             "Zero-init ARB should produce h' = h"
 
@@ -41,7 +41,7 @@ class TestARBModule:
             arb.inject.projection.weight.fill_(0.01)
 
         h = torch.randn(2, 3, 64, requires_grad=True)
-        h_out, _, _ = arb(h)
+        h_out, _, _, _, _ = arb(h)
         loss = h_out.sum()
         loss.backward()
 
@@ -89,9 +89,9 @@ class TestARBModule:
         h2 = torch.randn(1, 3, 64)
         h_batch = torch.cat([h1, h2], dim=0)
 
-        out_batch, _, _ = arb(h_batch)
-        out1, _, _ = arb(h1)
-        out2, _, _ = arb(h2)
+        out_batch, _, _, _, _ = arb(h_batch)
+        out1, _, _, _, _ = arb(h1)
+        out2, _, _, _, _ = arb(h2)
 
         assert torch.allclose(out_batch[0], out1[0], atol=1e-5)
         assert torch.allclose(out_batch[1], out2[0], atol=1e-5)

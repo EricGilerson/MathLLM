@@ -19,27 +19,27 @@ class TestOperandExtractor:
     def test_output_shape(self):
         ext = OperandExtractor(hidden_dim=64, num_digits=10)
         h = torch.randn(2, 5, 64)
-        d_a, d_b = ext(h)
+        d_a, d_b, _, _ = ext(h)
         assert d_a.shape == (2, 5, 10)
         assert d_b.shape == (2, 5, 10)
 
     def test_output_range(self):
         ext = OperandExtractor(hidden_dim=64, num_digits=10)
         h = torch.randn(2, 5, 64) * 10  # large inputs
-        d_a, d_b = ext(h)
+        d_a, d_b, _, _ = ext(h)
         assert (d_a >= 0).all() and (d_a <= 9).all()
         assert (d_b >= 0).all() and (d_b <= 9).all()
 
     def test_output_integers(self):
         ext = OperandExtractor(hidden_dim=64, num_digits=10)
         h = torch.randn(2, 5, 64)
-        d_a, _ = ext(h)
+        d_a, _, _, _ = ext(h)
         assert torch.equal(d_a, d_a.round())
 
     def test_gradient_flow(self):
         ext = OperandExtractor(hidden_dim=64, num_digits=10)
         h = torch.randn(2, 5, 64, requires_grad=True)
-        d_a, d_b = ext(h)
+        d_a, d_b, _, _ = ext(h)
         loss = (d_a.sum() + d_b.sum())
         loss.backward()
         assert h.grad is not None

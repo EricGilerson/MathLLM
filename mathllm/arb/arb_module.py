@@ -79,7 +79,7 @@ class ArithmeticResidualBlock(nn.Module):
         for param in self.compute.parameters():
             param.requires_grad = False
 
-    def forward(self, h: Tensor) -> tuple[Tensor, Tensor, Tensor]:
+    def forward(self, h: Tensor) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
         """Run the full ARB on the hidden state.
 
         Args:
@@ -89,11 +89,13 @@ class ArithmeticResidualBlock(nn.Module):
             h': [batch, seq_len, hidden_dim] — h + delta_h from arithmetic
             d_a: [batch, seq_len, num_digits] — extracted digit vector for operand A
             d_b: [batch, seq_len, num_digits] — extracted digit vector for operand B
+            d_a_cont: [batch, seq_len, num_digits] — continuous (pre-round) operand A
+            d_b_cont: [batch, seq_len, num_digits] — continuous (pre-round) operand B
         """
         # Stage 1: Extract operand digit vectors
-        d_a, d_b = self.extract(h)
+        d_a, d_b, d_a_cont, d_b_cont = self.extract(h)
 
-        # Stage 2: Encode to RNS circles
+        # Stage 2: Encode to RNS circles (uses rounded values)
         a_circle = self.encode(d_a)          # [B, S, m, 2]
         b_circle = self.encode(d_b)          # [B, S, m, 2]
         b_exp_circle = self.encode.encode_exponent(d_b)  # [B, S, m, 2]
@@ -104,7 +106,7 @@ class ArithmeticResidualBlock(nn.Module):
 
         # Stage 4: Inject into hidden state with residual connection
         h_prime = self.inject(results, h)
-        return h_prime, d_a, d_b
+        return h_prime, d_a, d_b, d_a_cont, d_b_cont
 
     def count_parameters(self) -> dict[str, int]:
         """Count learned vs frozen parameters."""

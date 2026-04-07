@@ -11,7 +11,7 @@ arb:
   gate_init_logit: -2.0  # sigmoid(-2) ~ 0.12; learnable injection gate
 
 data:
-  num_positive: 50000
+  num_positive: 100000
   num_negative: 50000
   num_edge_cases: 10000
   max_digits: 10
@@ -24,7 +24,7 @@ training:
   lr: 3.0e-4
   weight_decay: 0.01
   batch_size: 512
-  max_epochs: 10
+  max_epochs: 20
   checkpoint_every_steps: 0
   max_seq_len: 128
   warmup_steps: 100

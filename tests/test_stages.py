@@ -19,9 +19,11 @@ class TestOperandExtractor:
     def test_output_shape(self):
         ext = OperandExtractor(hidden_dim=64, num_digits=10)
         h = torch.randn(2, 5, 64)
-        d_a, d_b, _, _ = ext(h)
+        d_a, d_b, logits_a, logits_b = ext(h)
         assert d_a.shape == (2, 5, 10)
         assert d_b.shape == (2, 5, 10)
+        assert logits_a.shape == (2, 5, 10, 10)
+        assert logits_b.shape == (2, 5, 10, 10)
 
     def test_output_range(self):
         ext = OperandExtractor(hidden_dim=64, num_digits=10)

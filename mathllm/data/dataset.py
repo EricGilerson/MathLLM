@@ -204,6 +204,9 @@ class ArithmeticDataset(Dataset):
         self.digits_a = torch.zeros(n, self.num_digits, dtype=torch.float32)
         self.digits_b = torch.zeros(n, self.num_digits, dtype=torch.float32)
         self.has_aux = torch.zeros(n, dtype=torch.bool)
+        self.max_operand_digits = torch.zeros(n, dtype=torch.long)
+        # eq_positions will be populated after tokenization
+        self.eq_positions = torch.zeros(n, dtype=torch.long)
 
         for i, rec in enumerate(self.records):
             op_a = rec.get("operand_a")
@@ -216,6 +219,13 @@ class ArithmeticDataset(Dataset):
                     _int_to_digits(op_b, self.num_digits), dtype=torch.float32
                 )
                 self.has_aux[i] = True
+            # Compute max digit count for curriculum filtering
+            d = 0
+            if op_a is not None:
+                d = max(d, len(str(abs(op_a))))
+            if op_b is not None:
+                d = max(d, len(str(abs(op_b))))
+            self.max_operand_digits[i] = d
 
     @staticmethod
     def _load_jsonl(path: str | Path) -> list[dict[str, Any]]:
@@ -245,6 +255,23 @@ class ArithmeticDataset(Dataset):
 
         for idx, record in enumerate(self.records):
             target_start = record["target_start"]
+            # Compute eq_position: token index where both operands are visible.
+            # We use target_start (char offset of the answer) as a proxy — by
+            # the answer position, both operands have been seen via causal attn.
+            # For examples without target_start, infer it for eq_position only.
+            eq_char = target_start
+            if eq_char is None:
+                eq_char = _infer_target_start(record["text"])
+            if eq_char is not None:
+                eq_prefix = record["text"][:eq_char]
+                eq_prefix_ids = self.tokenizer(
+                    eq_prefix,
+                    truncation=True,
+                    max_length=self.max_length,
+                    add_special_tokens=False,
+                )["input_ids"]
+                self.eq_positions[idx] = min(len(eq_prefix_ids), self.max_length)
+
             if target_start is None:
                 continue
 
@@ -259,7 +286,7 @@ class ArithmeticDataset(Dataset):
             self.labels[idx, :prefix_len] = -100
 
     def set_tokenizer(self, tokenizer) -> None:
-        """Set tokenizer and tokenize examples."""
+        """Set tokenizer and tokenize examples (also computes eq_positions)."""
         self.tokenizer = tokenizer
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
@@ -288,7 +315,22 @@ class ArithmeticDataset(Dataset):
             labels = input_ids.clone()
             labels[attention_mask == 0] = -100
 
-            target_start = _infer_target_start(text) if self.answer_only_loss else None
+            # Compute eq_position dynamically for augmented text
+            eq_char = _infer_target_start(text)
+            if eq_char is not None:
+                eq_prefix_ids = self.tokenizer(
+                    text[:eq_char],
+                    truncation=True,
+                    max_length=self.max_length,
+                    add_special_tokens=False,
+                )["input_ids"]
+                eq_position = torch.tensor(
+                    min(len(eq_prefix_ids), self.max_length), dtype=torch.long
+                )
+            else:
+                eq_position = torch.tensor(0, dtype=torch.long)
+
+            target_start = eq_char if self.answer_only_loss else None
             if target_start is not None:
                 prefix = text[:target_start]
                 prefix_ids = self.tokenizer(
@@ -305,6 +347,7 @@ class ArithmeticDataset(Dataset):
             input_ids = self.encodings["input_ids"][idx]
             attention_mask = self.encodings["attention_mask"][idx]
             labels = self.labels[idx]
+            eq_position = self.eq_positions[idx]
 
         return {
             "input_ids": input_ids,
@@ -313,6 +356,7 @@ class ArithmeticDataset(Dataset):
             "digits_a": self.digits_a[idx],
             "digits_b": self.digits_b[idx],
             "has_aux": self.has_aux[idx],
+            "eq_position": eq_position,
         }
 
     def split(self, train_ratio: float = 0.9) -> tuple["ArithmeticDataset", "ArithmeticDataset"]:

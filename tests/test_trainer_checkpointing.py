@@ -35,6 +35,7 @@ class ToyDataset(Dataset):
             "digits_a": torch.zeros(10, dtype=torch.float32),
             "digits_b": torch.zeros(10, dtype=torch.float32),
             "has_aux": torch.tensor(False),
+            "eq_position": torch.tensor(0, dtype=torch.long),
         }
 
 

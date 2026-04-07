@@ -36,12 +36,12 @@ class TestModelIntegration:
         assert "arb_extractions" in outputs
         assert outputs["logits"].shape == (1, 5, 50257)  # GPT-2 vocab size
         assert outputs["loss"].item() > 0
-        # Check extraction outputs from each ARB layer
+        # Check extraction logit outputs from each ARB layer
         for pos in config.arb.layer_positions:
             assert pos in outputs["arb_extractions"]
-            d_a, d_b = outputs["arb_extractions"][pos]
-            assert d_a.shape == (1, 5, config.rns.num_digit_slots)
-            assert d_b.shape == (1, 5, config.rns.num_digit_slots)
+            logits_a, logits_b = outputs["arb_extractions"][pos]
+            assert logits_a.shape == (1, 5, config.rns.num_digit_slots, config.arb.extraction_num_classes)
+            assert logits_b.shape == (1, 5, config.rns.num_digit_slots, config.arb.extraction_num_classes)
 
     def test_zero_init_matches_base(self, config):
         """With zero W_proj, output should match unmodified GPT-2."""
@@ -80,12 +80,13 @@ class TestModelIntegration:
         outputs = model(input_ids=input_ids, labels=labels)
         outputs["loss"].backward()
 
-        # Check that extraction weights have gradients
+        # Check that extraction MLP weights have gradients
         for key, arb in model.arbs.items():
-            assert arb.extract.W_a.weight.grad is not None, \
-                f"ARB {key}: W_a has no gradient"
-            assert arb.extract.W_a.weight.grad.abs().sum() > 0, \
-                f"ARB {key}: W_a gradient is zero"
+            first_layer = arb.extract.head_a[0]
+            assert first_layer.weight.grad is not None, \
+                f"ARB {key}: head_a has no gradient"
+            assert first_layer.weight.grad.abs().sum() > 0, \
+                f"ARB {key}: head_a gradient is zero"
 
     def test_only_arb_params_trainable(self, config):
         """Only ARB learned params should have requires_grad=True."""

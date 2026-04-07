@@ -23,6 +23,8 @@ class ARBConfig:
     dropout: float = 0.1  # dropout on extraction and injection layers
     injector_init_std: float = 1e-3  # small non-zero init so gradients reach extraction
     gate_init_logit: float = -2.0  # sigmoid(-2) ~ 0.12; learnable injection gate start
+    extraction_mlp_hidden: int = 128  # hidden dim for extraction MLP
+    extraction_num_classes: int = 10  # classes per digit (base-10)
 
 
 @dataclass
@@ -64,6 +66,8 @@ class TrainingConfig:
     phase3_epochs: int = 3  # end-to-end, aux loss decayed
     aux_loss_weight: float = 1.0  # lambda for auxiliary extraction loss
     aux_loss_decay: float = 0.1  # multiplier for aux weight in phase 3
+    phase1_aux_only: bool = True  # filter to aux-eligible examples in Phase 1
+    curriculum_schedule: tuple[tuple[float, int], ...] = ((0.0, 3), (0.4, 6), (0.7, 10))
 
 
 @dataclass
@@ -92,7 +96,10 @@ def _merge_into_dataclass(dc: Any, overrides: dict) -> Any:
             _merge_into_dataclass(current, value)
         else:
             if isinstance(value, list) and isinstance(current, tuple):
-                value = tuple(value)
+                value = tuple(
+                    tuple(item) if isinstance(item, list) else item
+                    for item in value
+                )
             setattr(dc, key, value)
     return dc
 

@@ -57,3 +57,27 @@ def ste_round_clamp(x: Tensor, low: int = 0, high: int = 9) -> Tensor:
     Backward: identity (gradients pass through unchanged)
     """
     return ste_round(ste_clamp(x, float(low), float(high)))
+
+
+def ste_argmax(logits: Tensor) -> Tensor:
+    """Argmax on the last dimension with straight-through gradient.
+
+    Forward: argmax(logits, dim=-1) — hard integer indices.
+    Backward: gradients flow through a soft weighted-index approximation,
+    i.e. (softmax(logits) * arange(C)).sum(-1).
+
+    This enables gradient flow from downstream losses (e.g. LM loss in Phase 2+)
+    back through the discrete digit selection to the classification logits.
+
+    Args:
+        logits: [..., C] classification logits
+
+    Returns:
+        [...] float tensor of integer indices in [0, C-1]
+    """
+    hard = logits.argmax(dim=-1).float()
+    soft_weights = torch.softmax(logits, dim=-1)
+    indices = torch.arange(logits.size(-1), device=logits.device, dtype=logits.dtype)
+    soft = (soft_weights * indices).sum(dim=-1)
+    # STE trick: forward uses hard, backward uses soft
+    return hard - soft.detach() + soft

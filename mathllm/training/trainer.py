@@ -15,7 +15,7 @@ from pathlib import Path
 from tqdm import tqdm
 
 import torch
-from torch.utils.data import DataLoader, RandomSampler, SequentialSampler
+from torch.utils.data import DataLoader, RandomSampler, SequentialSampler, SubsetRandomSampler
 
 from mathllm.config import TrainingConfig
 from mathllm.model.gpt2_arb import GPT2WithARB
@@ -73,7 +73,8 @@ class ARBTrainer:
         self.device = device or torch.device("cpu")
 
         self.accumulation_steps = max(config.gradient_accumulation_steps, 1)
-        self.steps_per_epoch = len(train_loader) // self.accumulation_steps
+        self._full_steps_per_epoch = len(train_loader) // self.accumulation_steps
+        self.steps_per_epoch = self._full_steps_per_epoch
         self.total_training_steps = self.steps_per_epoch * config.max_epochs
 
         self.global_step = 0
@@ -83,6 +84,19 @@ class ARBTrainer:
         self.patience_counter = 0
         self.early_stopped = False
         self._current_phase = 0  # will be set on first epoch
+
+        # Pre-compute aux-eligible indices for Phase 1 filtering
+        dataset = train_loader.dataset
+        if hasattr(dataset, "has_aux"):
+            self._aux_indices = torch.where(dataset.has_aux)[0].tolist()
+        else:
+            self._aux_indices = None
+
+        # Pre-compute max operand digits for curriculum filtering
+        if hasattr(dataset, "max_operand_digits"):
+            self._max_operand_digits = dataset.max_operand_digits
+        else:
+            self._max_operand_digits = None
 
         # Initial optimizer setup (will be rebuilt on phase transitions)
         self._build_optimizer()
@@ -133,6 +147,14 @@ class ARBTrainer:
         self.patience_counter = 0
         self.best_eval_loss = float("inf")
 
+        # Adjust steps_per_epoch for filtered Phase 1 dataset
+        if phase == 1 and self.config.phase1_aux_only and self._aux_indices:
+            filtered_size = len(self._aux_indices)
+            batch_size = self.train_loader.batch_size or 1
+            self.steps_per_epoch = max(1, filtered_size // batch_size // self.accumulation_steps)
+        else:
+            self.steps_per_epoch = self._full_steps_per_epoch
+
         self._build_optimizer()
         logger.info(
             "Phase transition: %s -> %s (trainable params: %s)",
@@ -173,6 +195,7 @@ class ARBTrainer:
             gt_digits_b=batch["digits_b"],
             has_aux=batch["has_aux"],
             attention_mask=batch["attention_mask"],
+            eq_positions=batch["eq_position"],
         )
 
         aux_weight = self.config.aux_loss_weight
@@ -232,12 +255,12 @@ class ARBTrainer:
         *,
         shuffle: bool,
         generator: torch.Generator | None = None,
+        sampler_override=None,
     ) -> DataLoader:
         """Clone a DataLoader with deterministic sampling settings."""
         kwargs = {
             "dataset": loader.dataset,
             "batch_size": loader.batch_size,
-            "shuffle": shuffle,
             "num_workers": loader.num_workers,
             "collate_fn": loader.collate_fn,
             "pin_memory": loader.pin_memory,
@@ -245,16 +268,75 @@ class ARBTrainer:
             "timeout": loader.timeout,
             "worker_init_fn": loader.worker_init_fn,
             "multiprocessing_context": loader.multiprocessing_context,
-            "generator": generator,
             "persistent_workers": loader.persistent_workers,
             "pin_memory_device": loader.pin_memory_device,
         }
+        if sampler_override is not None:
+            kwargs["sampler"] = sampler_override
+        else:
+            kwargs["shuffle"] = shuffle
+            kwargs["generator"] = generator
         if loader.num_workers > 0:
             kwargs["prefetch_factor"] = loader.prefetch_factor
         return DataLoader(**kwargs)
 
+    def _get_curriculum_max_digits(self, epoch: int) -> int | None:
+        """Return the curriculum digit cap for the current epoch, or None."""
+        schedule = self.config.curriculum_schedule
+        if not schedule or self._current_phase != 1:
+            return None
+        phase1_progress = epoch / max(self.config.phase1_epochs, 1)
+        max_digits = schedule[0][1]
+        for frac, digits in schedule:
+            if phase1_progress >= frac:
+                max_digits = digits
+        return max_digits
+
+    def _get_filtered_indices(self, epoch: int) -> list[int] | None:
+        """Compute eligible sample indices for Phase 1 (aux + curriculum)."""
+        if self._current_phase != 1:
+            return None
+
+        indices = None
+
+        # Aux-only filtering
+        if self.config.phase1_aux_only and self._aux_indices:
+            indices = set(self._aux_indices)
+
+        # Curriculum filtering
+        max_digits = self._get_curriculum_max_digits(epoch)
+        if max_digits is not None and self._max_operand_digits is not None:
+            eligible = torch.where(
+                (self._max_operand_digits <= max_digits)
+                & (self._max_operand_digits > 0)  # exclude non-operand examples
+            )[0].tolist()
+            if indices is not None:
+                indices = indices & set(eligible)
+            else:
+                indices = set(eligible)
+
+        return sorted(indices) if indices is not None else None
+
     def _build_epoch_train_loader(self, epoch: int) -> DataLoader:
         """Build a deterministic train loader for the requested epoch."""
+        filtered_indices = self._get_filtered_indices(epoch)
+        if filtered_indices is not None and len(filtered_indices) > 0:
+            # Phase 1 with filtering: use SubsetRandomSampler
+            generator = torch.Generator()
+            generator.manual_seed(_TRAIN_SAMPLER_SEED + epoch)
+            # Shuffle the indices deterministically
+            perm = torch.randperm(len(filtered_indices), generator=generator)
+            shuffled = [filtered_indices[i] for i in perm]
+            sampler = SubsetRandomSampler(shuffled)
+            # Update steps_per_epoch for the filtered dataset size
+            batch_size = self.train_loader.batch_size or 1
+            self.steps_per_epoch = max(
+                1, len(filtered_indices) // batch_size // self.accumulation_steps
+            )
+            return self._clone_loader(
+                self.train_loader, shuffle=False, sampler_override=sampler
+            )
+
         sampler = self.train_loader.sampler
         if isinstance(sampler, RandomSampler):
             generator = torch.Generator()
@@ -590,6 +672,7 @@ class ARBTrainer:
                     gt_digits_b=batch["digits_b"],
                     has_aux=batch["has_aux"],
                     attention_mask=batch["attention_mask"],
+                    eq_positions=batch["eq_position"],
                 )
                 total_aux += aux_loss.item()
                 num_batches += 1

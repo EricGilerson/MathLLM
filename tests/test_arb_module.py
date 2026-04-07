@@ -45,9 +45,10 @@ class TestARBModule:
         loss = h_out.sum()
         loss.backward()
 
-        # Check extraction weights received gradients
-        assert arb.extract.W_a.weight.grad is not None
-        assert arb.extract.W_a.weight.grad.abs().sum() > 0
+        # Check extraction MLP weights received gradients
+        first_layer = arb.extract.head_a[0]
+        assert first_layer.weight.grad is not None
+        assert first_layer.weight.grad.abs().sum() > 0
 
     def test_frozen_stages_no_gradients(self):
         """Frozen stages should not have requires_grad=True."""
@@ -71,10 +72,12 @@ class TestARBModule:
         arb = ArithmeticResidualBlock(hidden_dim=768, primes=DEFAULT_PRIMES)
         counts = arb.count_parameters()
         assert counts["learned"] > 0
-        # Extraction: 2 * (768 * 10 + 10) = 15380
+        # Extraction MLP per operand: Linear(768, 128) + Linear(128, 10*10)
+        #   = (768*128 + 128) + (128*100 + 100) = 98432 + 12900 = 111332
+        # Two operands: 2 * 111332 = 222664
         # Injection: result_dim = 5 * 9 * 2 = 90; Linear(90, 768) = 90*768 + 768 = 69888
         # Gate: 1 scalar parameter
-        expected_learned = 15380 + 69888 + 1
+        expected_learned = 222664 + 69888 + 1
         assert counts["learned"] == expected_learned, \
             f"Expected {expected_learned} learned params, got {counts['learned']}"
 

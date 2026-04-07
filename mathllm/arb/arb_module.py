@@ -40,6 +40,8 @@ class ArithmeticResidualBlock(nn.Module):
         dropout: float = 0.1,
         injector_init_std: float = 1e-3,
         gate_init_logit: float = -2.0,
+        num_classes: int = 10,
+        mlp_hidden: int = 128,
     ):
         super().__init__()
         self.hidden_dim = hidden_dim
@@ -51,7 +53,12 @@ class ArithmeticResidualBlock(nn.Module):
         total_result_dim = num_results * num_primes * 2
 
         # Stage 1: Learned extraction
-        self.extract = OperandExtractor(hidden_dim, num_digits, dropout=dropout)
+        self.extract = OperandExtractor(
+            hidden_dim, num_digits,
+            num_classes=num_classes,
+            mlp_hidden=mlp_hidden,
+            dropout=dropout,
+        )
 
         # Stage 2: Frozen encoding
         self.encode = RNSCircleEncoder(primes, num_digits)

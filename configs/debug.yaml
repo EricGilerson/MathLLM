@@ -8,6 +8,8 @@ arb:
   num_results: 5
   dropout: 0.1
   injector_init_std: 0.001
+  extraction_mlp_hidden: 128
+  extraction_num_classes: 10
 
 data:
   num_positive: 500
@@ -42,6 +44,8 @@ training:
   phase3_epochs: 0
   aux_loss_weight: 1.0
   aux_loss_decay: 0.1
+  phase1_aux_only: true
+  curriculum_schedule: [[0.0, 3], [0.5, 5]]
 
 evaluation:
   num_samples_per_config: 20

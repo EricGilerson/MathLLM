@@ -113,6 +113,7 @@ def test_dataset_returns_aux_targets():
     assert "digits_a" in item0
     assert "digits_b" in item0
     assert "has_aux" in item0
+    assert "eq_position" in item0
     assert item0["digits_a"].shape == (10,)
     assert item0["has_aux"].item() is True
     # 5 -> [5, 0, 0, 0, 0, 0, 0, 0, 0, 0] (LSB first)
@@ -120,6 +121,8 @@ def test_dataset_returns_aux_targets():
     assert item0["digits_a"][1].item() == 0
     # 3 -> [3, 0, 0, 0, ...]
     assert item0["digits_b"][0].item() == 3
+    # eq_position should be set for arithmetic examples
+    assert item0["eq_position"].dtype == torch.long
 
     item1 = ds[1]
     assert item1["has_aux"].item() is False

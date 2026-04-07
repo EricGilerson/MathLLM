@@ -9,6 +9,8 @@ arb:
   dropout: 0.1  # dropout on extraction and injection layers
   injector_init_std: 0.001
   gate_init_logit: -2.0  # sigmoid(-2) ~ 0.12; learnable injection gate
+  extraction_mlp_hidden: 128
+  extraction_num_classes: 10
 
 data:
   num_positive: 50000
@@ -45,6 +47,8 @@ training:
   phase3_epochs: 3   # end-to-end, aux loss decayed
   aux_loss_weight: 1.0
   aux_loss_decay: 0.1
+  phase1_aux_only: true
+  curriculum_schedule: [[0.0, 3], [0.4, 6], [0.7, 10]]
 
 evaluation:
   num_samples_per_config: 200

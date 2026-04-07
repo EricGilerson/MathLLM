@@ -1,18 +1,18 @@
 """Auxiliary losses for ARB training.
 
 The key auxiliary loss directly supervises digit extraction (Stage 1) against
-ground-truth operand digits. This breaks the chicken-and-egg problem where
-extraction and injection must learn simultaneously from weak LM loss.
+ground-truth operand digits using per-digit cross-entropy classification.
 
-The loss is computed on continuous (pre-round) extraction outputs, giving
-smooth proportional gradients rather than quantized integer-valued ones.
-A position-weight ramp emphasises later sequence positions, which have
-seen both operands via causal attention.
+The loss is computed on classification logits, giving strong gradient signal
+for discrete digit prediction. A binary position mask restricts supervision
+to sequence positions at or after eq_position, where both operands have been
+seen via causal attention.
 """
 
 from __future__ import annotations
 
 import torch
+import torch.nn.functional as F
 from torch import Tensor
 
 
@@ -22,64 +22,75 @@ def compute_extraction_loss(
     gt_digits_b: Tensor,
     has_aux: Tensor,
     attention_mask: Tensor,
+    eq_positions: Tensor,
 ) -> Tensor:
-    """Compute MSE loss between extracted and ground-truth digit vectors.
+    """Compute cross-entropy loss between extracted logits and ground-truth digits.
 
-    The ground-truth digits are broadcast across all sequence positions —
-    at every token, the ARB should learn to extract the example's operands.
-    A position-weight ramp (0→1 across the sequence) down-weights early
-    positions that cannot yet see both operands due to causal attention.
+    Only positions at or after eq_position are supervised — earlier positions
+    cannot have seen both operands due to causal attention.
 
     Args:
-        arb_extractions: {layer_id: (d_a_cont, d_b_cont)} where values are
-            continuous (pre-round) extractions [B, S, K]
-        gt_digits_a: [B, K] ground-truth digit vector for operand A
-        gt_digits_b: [B, K] ground-truth digit vector for operand B
+        arb_extractions: {layer_id: (logits_a, logits_b)} where values are
+            classification logits [B, S, K, C]
+        gt_digits_a: [B, K] ground-truth digit vector for operand A (float)
+        gt_digits_b: [B, K] ground-truth digit vector for operand B (float)
         has_aux: [B] boolean mask (True for examples with valid aux targets)
         attention_mask: [B, S] (1 = real token, 0 = padding)
+        eq_positions: [B] token index where both operands are visible
 
     Returns:
-        Scalar MSE loss averaged over valid entries, or zero if no valid entries.
+        Scalar cross-entropy loss averaged over valid entries, or zero if none.
     """
     if not arb_extractions or not has_aux.any():
-        # Return a zero that participates in the graph so backward() works
-        # when this is the only loss component (Phase 1 with no aux examples).
-        for _layer_id, (d_a, _d_b) in arb_extractions.items():
-            return (d_a * 0).sum()
+        for _layer_id, (logits_a, _logits_b) in arb_extractions.items():
+            return (logits_a * 0).sum()
         return gt_digits_a.new_zeros((), requires_grad=True)
 
-    # [B, 1, K] — broadcast target across sequence positions
-    target_a = gt_digits_a.unsqueeze(1)
-    target_b = gt_digits_b.unsqueeze(1)
+    B, S = attention_mask.shape
 
-    # [B, S, 1] — mask: valid example AND non-padding token
-    mask = (has_aux.unsqueeze(1) & attention_mask.bool()).unsqueeze(2).float()
+    # Target digits as long for cross-entropy: [B, K]
+    target_a = gt_digits_a.long()
+    target_b = gt_digits_b.long()
 
-    # Position weight: ramp from 0→1 across sequence length.
-    # Later positions have seen more context via causal attention and are
-    # more likely to have both operands available for extraction.
-    seq_len = attention_mask.size(1)
-    pos_weight = torch.linspace(0.0, 1.0, seq_len, device=mask.device)
-    pos_weight = pos_weight[None, :, None]  # [1, S, 1]
-    mask = mask * pos_weight
+    # Build position mask: only supervise at positions >= eq_position
+    positions = torch.arange(S, device=attention_mask.device).unsqueeze(0)  # [1, S]
+    pos_mask = (positions >= eq_positions.unsqueeze(1)).float()  # [B, S]
+
+    # Combined mask: has_aux AND non-padding AND position >= eq_position
+    mask = (
+        has_aux.float().unsqueeze(1)        # [B, 1]
+        * attention_mask.float()             # [B, S]
+        * pos_mask                           # [B, S]
+    )  # [B, S]
 
     total_loss = gt_digits_a.new_zeros(())
     num_layers = 0
 
-    for _layer_id, (d_a, d_b) in arb_extractions.items():
-        # d_a, d_b: [B, S, K] — continuous (pre-round) values
-        err_a = (d_a - target_a) ** 2  # [B, S, K]
-        err_b = (d_b - target_b) ** 2  # [B, S, K]
+    for _layer_id, (logits_a, logits_b) in arb_extractions.items():
+        # logits_a, logits_b: [B, S, K, C]
+        K = logits_a.size(2)
+        C = logits_a.size(3)
 
-        # Mask and average
-        masked_err = (err_a + err_b) * mask  # [B, S, K]
-        count = mask.sum() * d_a.size(-1)  # total valid (position, digit) entries
+        # Broadcast targets across sequence positions: [B, K] -> [B, S, K]
+        tgt_a = target_a.unsqueeze(1).expand(B, S, K)
+        tgt_b = target_b.unsqueeze(1).expand(B, S, K)
+
+        # Flatten for cross_entropy: [B*S*K, C] and [B*S*K]
+        ce_a = F.cross_entropy(
+            logits_a.reshape(-1, C), tgt_a.reshape(-1), reduction="none"
+        ).view(B, S, K)
+        ce_b = F.cross_entropy(
+            logits_b.reshape(-1, C), tgt_b.reshape(-1), reduction="none"
+        ).view(B, S, K)
+
+        # Apply mask: [B, S, 1] broadcast over K digits
+        masked_ce = (ce_a + ce_b) * mask.unsqueeze(2)  # [B, S, K]
+        count = mask.sum() * K
         if count > 0:
-            total_loss = total_loss + masked_err.sum() / count
+            total_loss = total_loss + masked_ce.sum() / count
         num_layers += 1
 
     if num_layers > 0:
         total_loss = total_loss / num_layers
 
     return total_loss
-

@@ -76,6 +76,8 @@ class GPT2WithARB(nn.Module):
                 dropout=config.arb.dropout,
                 injector_init_std=config.arb.injector_init_std,
                 gate_init_logit=config.arb.gate_init_logit,
+                num_classes=config.arb.extraction_num_classes,
+                mlp_hidden=config.arb.extraction_mlp_hidden,
             )
 
     def forward(
@@ -159,8 +161,8 @@ class GPT2WithARB(nn.Module):
 
             # Insert ARB after this layer if configured
             if i in self.arb_positions:
-                hidden_states, d_a, d_b, d_a_cont, d_b_cont = self.arbs[str(i)](hidden_states)
-                arb_extractions[i] = (d_a_cont, d_b_cont)  # continuous for smooth aux loss
+                hidden_states, d_a, d_b, logits_a, logits_b = self.arbs[str(i)](hidden_states)
+                arb_extractions[i] = (logits_a, logits_b)  # classification logits for aux loss
 
         # Final layer norm
         hidden_states = transformer.ln_f(hidden_states)

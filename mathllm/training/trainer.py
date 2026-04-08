@@ -462,8 +462,15 @@ class ARBTrainer:
                     self.early_stopped = True
             elif self.eval_loader is not None and phase == 1:
                 # Phase 1: evaluate extraction quality only (no early stopping)
-                aux_eval = self._evaluate_extraction()
-                epoch_bar.set_postfix(loss=f"{epoch_loss_value:.4f}", aux_eval=f"{aux_eval:.4f}", phase=phase)
+                # Skip eval during early curriculum — results are misleading when
+                # model only trains on small digits but eval uses the full range.
+                curriculum_max = self._get_curriculum_max_digits(epoch)
+                full_digits = self.config.curriculum_schedule[-1][1] if self.config.curriculum_schedule else None
+                if curriculum_max is None or curriculum_max >= (full_digits or 0):
+                    aux_eval = self._evaluate_extraction()
+                    epoch_bar.set_postfix(loss=f"{epoch_loss_value:.4f}", aux_eval=f"{aux_eval:.4f}", phase=phase)
+                else:
+                    epoch_bar.set_postfix(loss=f"{epoch_loss_value:.4f}", phase=phase)
 
             self._save_checkpoint(f"epoch_{epoch + 1}")
 

@@ -49,7 +49,7 @@ training:
   aux_loss_weight: 1.0
   aux_loss_decay: 0.1
   phase1_aux_only: true
-  curriculum_schedule: [[0.0, 3], [0.5, 5]]
+  curriculum_schedule: []  # disabled for pure arithmetic — full digit range from epoch 1
 
 evaluation:
   num_samples_per_config: 200

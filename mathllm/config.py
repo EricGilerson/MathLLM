@@ -36,6 +36,7 @@ class DataConfig:
     max_value: int = 1_000_000_000
     seed: int = 42
     output_dir: str = "data/"
+    pure_arithmetic: bool = False  # Generate only "A op B = C" format
 
 
 @dataclass

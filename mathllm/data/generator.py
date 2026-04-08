@@ -562,6 +562,66 @@ class ArithmeticDataGenerator:
             return ArithmeticRecord(text=text, op_type="edge", operand_a=a, operand_b=a, result=product)
 
     # ------------------------------------------------------------------
+    # Pure arithmetic mode: "A op B = C" format only
+    # ------------------------------------------------------------------
+
+    def _generate_pure_addition(self) -> ArithmeticRecord | None:
+        a, b = self._sample_operands()
+        result = a + b
+        if abs(result) > self.max_value:
+            return None
+        return ArithmeticRecord(text=f"{a}+{b}={result}", op_type="add", operand_a=a, operand_b=b, result=result)
+
+    def _generate_pure_subtraction(self) -> ArithmeticRecord | None:
+        a, b = self._sample_operands()
+        result = a - b
+        return ArithmeticRecord(text=f"{a}-{b}={result}", op_type="sub", operand_a=a, operand_b=b, result=result)
+
+    def _generate_pure_multiplication(self) -> ArithmeticRecord | None:
+        d1 = self.rng.randint(1, min(5, self.config.max_digits))
+        d2 = self.rng.randint(1, min(5, self.config.max_digits))
+        low1 = 10 ** (d1 - 1) if d1 > 1 else 0
+        low2 = 10 ** (d2 - 1) if d2 > 1 else 0
+        a = self.rng.randint(low1, 10**d1 - 1)
+        b = self.rng.randint(low2, 10**d2 - 1)
+        result = a * b
+        if abs(result) > self.max_value:
+            return None
+        return ArithmeticRecord(text=f"{a}*{b}={result}", op_type="mul", operand_a=a, operand_b=b, result=result)
+
+    def _generate_pure_exponentiation(self) -> ArithmeticRecord | None:
+        b = self.rng.randint(0, 15)
+        if b == 0:
+            a = self.rng.randint(1, 999)
+        else:
+            a_max = int(self.max_value ** (1.0 / max(b, 1)))
+            a = self.rng.randint(1, max(a_max, 2))
+        result = a**b
+        if result > self.max_value:
+            return None
+        return ArithmeticRecord(text=f"{a}^{b}={result}", op_type="exp", operand_a=a, operand_b=b, result=result)
+
+    def _generate_pure_division(self) -> ArithmeticRecord | None:
+        b = self.rng.randint(1, 999)
+        quotient = self.rng.randint(1, max(1, self.max_value // max(b, 1)))
+        a = b * quotient
+        if a > self.max_value:
+            return None
+        return ArithmeticRecord(text=f"{a}/{b}={quotient}", op_type="div", operand_a=a, operand_b=b, result=quotient)
+
+    def _generate_pure_example(self) -> ArithmeticRecord | None:
+        """Generate one pure arithmetic example (A op B = C)."""
+        op = self.rng.choice(["add", "sub", "mul", "exp", "div"])
+        generators = {
+            "add": self._generate_pure_addition,
+            "sub": self._generate_pure_subtraction,
+            "mul": self._generate_pure_multiplication,
+            "exp": self._generate_pure_exponentiation,
+            "div": self._generate_pure_division,
+        }
+        return generators[op]()
+
+    # ------------------------------------------------------------------
     # Top-level generation
     # ------------------------------------------------------------------
 
@@ -598,6 +658,18 @@ class ArithmeticDataGenerator:
     def generate_dataset(self) -> list[ArithmeticRecord]:
         """Generate the complete training dataset."""
         examples: list[ArithmeticRecord] = []
+
+        if self.config.pure_arithmetic:
+            # Pure arithmetic mode: only "A op B = C" format, no NL/negatives
+            attempts = 0
+            max_attempts = self.config.num_positive * 5
+            while len(examples) < self.config.num_positive and attempts < max_attempts:
+                ex = self._generate_pure_example()
+                if ex is not None:
+                    examples.append(ex)
+                attempts += 1
+            self.rng.shuffle(examples)
+            return examples
 
         # Positive examples
         attempts = 0

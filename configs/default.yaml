@@ -20,6 +20,7 @@ data:
   max_value: 1000000000  # 10^9
   seed: 42
   output_dir: "data/"
+  pure_arithmetic: true
 
 training:
   base_model: "gpt2"

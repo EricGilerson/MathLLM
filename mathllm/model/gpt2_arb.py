@@ -78,6 +78,8 @@ class GPT2WithARB(nn.Module):
                 gate_init_logit=config.arb.gate_init_logit,
                 num_classes=config.arb.extraction_num_classes,
                 mlp_hidden=config.arb.extraction_mlp_hidden,
+                use_attention=config.arb.extraction_use_attention,
+                attn_rank=config.arb.extraction_attn_rank,
             )
 
     def forward(
@@ -161,7 +163,9 @@ class GPT2WithARB(nn.Module):
 
             # Insert ARB after this layer if configured
             if i in self.arb_positions:
-                hidden_states, d_a, d_b, logits_a, logits_b = self.arbs[str(i)](hidden_states)
+                hidden_states, d_a, d_b, logits_a, logits_b = self.arbs[str(i)](
+                    hidden_states, attention_mask
+                )
                 arb_extractions[i] = (logits_a, logits_b)  # classification logits for aux loss
 
         # Final layer norm

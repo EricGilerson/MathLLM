@@ -25,6 +25,8 @@ class ARBConfig:
     gate_init_logit: float = -2.0  # sigmoid(-2) ~ 0.12; learnable injection gate start
     extraction_mlp_hidden: int = 128  # hidden dim for extraction MLP
     extraction_num_classes: int = 10  # classes per digit (base-10)
+    extraction_use_attention: bool = False  # use cross-position attention for extraction
+    extraction_attn_rank: int = 32  # low-rank dimension for extraction attention
 
 
 @dataclass

@@ -8,8 +8,10 @@ arb:
   num_results: 5
   dropout: 0.1
   injector_init_std: 0.001
-  extraction_mlp_hidden: 128
+  extraction_mlp_hidden: 256
   extraction_num_classes: 10
+  extraction_use_attention: true
+  extraction_attn_rank: 32
 
 data:
   num_positive: 500
@@ -23,7 +25,7 @@ data:
 
 training:
   base_model: "gpt2"
-  lr: 3.0e-4
+  lr: 1.0e-3
   weight_decay: 0.01
   batch_size: 16
   max_epochs: 10

@@ -9,8 +9,10 @@ arb:
   dropout: 0.1  # dropout on extraction and injection layers
   injector_init_std: 0.001
   gate_init_logit: -2.0  # sigmoid(-2) ~ 0.12; learnable injection gate
-  extraction_mlp_hidden: 128
+  extraction_mlp_hidden: 256
   extraction_num_classes: 10
+  extraction_use_attention: true
+  extraction_attn_rank: 32
 
 data:
   num_positive: 50000
@@ -24,7 +26,7 @@ data:
 
 training:
   base_model: "gpt2"
-  lr: 3.0e-4
+  lr: 1.0e-3
   weight_decay: 0.01
   batch_size: 64
   max_epochs: 30
@@ -43,9 +45,9 @@ training:
   max_eval_batches: 5
   eval_batch_size: 128
   # Phased training
-  phase1_epochs: 15  # extraction-only training (needs many epochs with filtered data)
-  phase2_epochs: 8   # extraction + injection, aux loss active
-  phase3_epochs: 7   # end-to-end, aux loss decayed
+  phase1_epochs: 8   # extraction-only (faster convergence with higher LR)
+  phase2_epochs: 12  # extraction + injection, aux loss active
+  phase3_epochs: 10  # end-to-end, aux loss decayed
   aux_loss_weight: 1.0
   aux_loss_decay: 0.1
   phase1_aux_only: true

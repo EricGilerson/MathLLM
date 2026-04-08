@@ -42,6 +42,8 @@ class ArithmeticResidualBlock(nn.Module):
         gate_init_logit: float = -2.0,
         num_classes: int = 10,
         mlp_hidden: int = 128,
+        use_attention: bool = False,
+        attn_rank: int = 32,
     ):
         super().__init__()
         self.hidden_dim = hidden_dim
@@ -58,6 +60,8 @@ class ArithmeticResidualBlock(nn.Module):
             num_classes=num_classes,
             mlp_hidden=mlp_hidden,
             dropout=dropout,
+            use_attention=use_attention,
+            attn_rank=attn_rank,
         )
 
         # Stage 2: Frozen encoding
@@ -86,11 +90,15 @@ class ArithmeticResidualBlock(nn.Module):
         for param in self.compute.parameters():
             param.requires_grad = False
 
-    def forward(self, h: Tensor) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
+    def forward(
+        self, h: Tensor, attention_mask: Tensor | None = None,
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
         """Run the full ARB on the hidden state.
 
         Args:
             h: [batch, seq_len, hidden_dim]
+            attention_mask: [batch, seq_len] (1 = real, 0 = padding).
+                Passed to extraction attention when enabled.
 
         Returns:
             h': [batch, seq_len, hidden_dim] — h + delta_h from arithmetic
@@ -100,7 +108,7 @@ class ArithmeticResidualBlock(nn.Module):
             d_b_cont: [batch, seq_len, num_digits] — continuous (pre-round) operand B
         """
         # Stage 1: Extract operand digit vectors
-        d_a, d_b, d_a_cont, d_b_cont = self.extract(h)
+        d_a, d_b, d_a_cont, d_b_cont = self.extract(h, attention_mask)
 
         # Stage 2: Encode to RNS circles (uses rounded values)
         a_circle = self.encode(d_a)          # [B, S, m, 2]

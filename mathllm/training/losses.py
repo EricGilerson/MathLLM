@@ -52,9 +52,11 @@ def compute_extraction_loss(
     target_a = gt_digits_a.long()
     target_b = gt_digits_b.long()
 
-    # Build position mask: only supervise at positions >= eq_position
+    # Build position mask: supervise only at eq_position (the '=' token).
+    # This is the cleanest extraction point — both operands are visible via
+    # causal attention but answer tokens have not yet appeared.
     positions = torch.arange(S, device=attention_mask.device).unsqueeze(0)  # [1, S]
-    pos_mask = (positions >= eq_positions.unsqueeze(1)).float()  # [B, S]
+    pos_mask = (positions == eq_positions.unsqueeze(1)).float()  # [B, S]
 
     # Combined mask: has_aux AND non-padding AND position >= eq_position
     mask = (

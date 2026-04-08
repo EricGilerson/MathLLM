@@ -270,7 +270,10 @@ class ArithmeticDataset(Dataset):
                     max_length=self.max_length,
                     add_special_tokens=False,
                 )["input_ids"]
-                self.eq_positions[idx] = min(len(eq_prefix_ids), self.max_length)
+                # Point to the last prefix token (the '=' sign), not one past it.
+                # This is the position where both operands are visible but the
+                # answer has not yet appeared — the cleanest extraction point.
+                self.eq_positions[idx] = max(0, min(len(eq_prefix_ids) - 1, self.max_length - 1))
 
             if target_start is None:
                 continue
@@ -325,7 +328,7 @@ class ArithmeticDataset(Dataset):
                     add_special_tokens=False,
                 )["input_ids"]
                 eq_position = torch.tensor(
-                    min(len(eq_prefix_ids), self.max_length), dtype=torch.long
+                    max(0, min(len(eq_prefix_ids) - 1, self.max_length - 1)), dtype=torch.long
                 )
             else:
                 eq_position = torch.tensor(0, dtype=torch.long)

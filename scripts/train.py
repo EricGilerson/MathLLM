@@ -69,6 +69,7 @@ def main():
             tokenizer=tokenizer,
             max_length=config.training.max_seq_len,
             answer_only_loss=config.training.answer_only_loss,
+            num_digits=config.rns.num_digit_slots,
         )
     else:
         logger.info("Generating training data on the fly...")
@@ -80,6 +81,7 @@ def main():
             tokenizer=tokenizer,
             max_length=config.training.max_seq_len,
             answer_only_loss=config.training.answer_only_loss,
+            num_digits=config.rns.num_digit_slots,
         )
 
     # Split into train/eval

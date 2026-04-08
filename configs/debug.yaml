@@ -25,10 +25,10 @@ training:
   base_model: "gpt2"
   lr: 3.0e-4
   weight_decay: 0.01
-  batch_size: 4
+  batch_size: 16
   max_epochs: 10
   checkpoint_every_steps: 0
-  max_seq_len: 64
+  max_seq_len: 32
   warmup_steps: 5
   grad_clip: 1.0
   log_every: 10

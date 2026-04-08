@@ -26,10 +26,10 @@ training:
   base_model: "gpt2"
   lr: 3.0e-4
   weight_decay: 0.01
-  batch_size: 16
+  batch_size: 64
   max_epochs: 30
   checkpoint_every_steps: 0
-  max_seq_len: 128
+  max_seq_len: 32
   warmup_steps: 10
   grad_clip: 1.0
   log_every: 50
@@ -41,7 +41,7 @@ training:
   answer_only_loss: false  # full next-token loss for richer gradients
   early_stopping_patience: 3  # stop if eval loss doesn't improve for N evals
   max_eval_batches: 5
-  eval_batch_size: 32
+  eval_batch_size: 128
   # Phased training
   phase1_epochs: 15  # extraction-only training (needs many epochs with filtered data)
   phase2_epochs: 8   # extraction + injection, aux loss active

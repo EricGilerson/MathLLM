@@ -29,7 +29,7 @@ training:
   batch_size: 512
   max_epochs: 30
   checkpoint_every_steps: 0
-  max_seq_len: 128
+  max_seq_len: 32
   warmup_steps: 10
   grad_clip: 1.0
   log_every: 50

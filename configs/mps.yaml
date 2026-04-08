@@ -1,6 +1,6 @@
 rns:
   primes: [7, 11, 13, 17, 19, 23, 29, 31, 37]
-  num_digit_slots: 10
+  num_digit_slots: 6
 
 arb:
   layer_positions: [4, 8, 10]
@@ -16,8 +16,8 @@ data:
   num_positive: 50000
   num_negative: 50000
   num_edge_cases: 10000
-  max_digits: 10
-  max_value: 1000000000  # 10^9
+  max_digits: 5
+  max_value: 100000
   seed: 42
   output_dir: "data/"
   pure_arithmetic: true
@@ -49,9 +49,9 @@ training:
   aux_loss_weight: 1.0
   aux_loss_decay: 0.1
   phase1_aux_only: true
-  curriculum_schedule: [[0.0, 3], [0.4, 6], [0.7, 10]]
+  curriculum_schedule: [[0.0, 3], [0.5, 5]]
 
 evaluation:
   num_samples_per_config: 200
-  max_digits_range: [1, 10]
+  max_digits_range: [1, 5]
   max_new_tokens: 20

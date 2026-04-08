@@ -1,6 +1,6 @@
 rns:
   primes: [7, 11, 13, 17, 19, 23, 29, 31, 37]
-  num_digit_slots: 10
+  num_digit_slots: 6
 
 arb:
   layer_positions: [4, 8, 10]
@@ -16,7 +16,7 @@ data:
   num_negative: 500
   num_edge_cases: 100
   max_digits: 5
-  max_value: 1000000000
+  max_value: 100000
   seed: 42
   output_dir: "data_debug/"
   pure_arithmetic: true

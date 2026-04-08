@@ -84,12 +84,12 @@ class OperandExtractor(nn.Module):
         causal = torch.triu(
             torch.ones(S, S, device=h.device, dtype=torch.bool), diagonal=1
         )
-        attn = attn.masked_fill(causal, -1e9)
+        attn = attn.masked_fill(causal, -6e4)
 
         # Padding mask: prevent attending to padding tokens
         if attention_mask is not None:
             pad_mask = (attention_mask == 0).unsqueeze(1)  # [B, 1, S]
-            attn = attn.masked_fill(pad_mask, -1e9)
+            attn = attn.masked_fill(pad_mask, -6e4)
 
         attn = F.softmax(attn, dim=-1)
         return attn @ h  # [B, S, hidden_dim]

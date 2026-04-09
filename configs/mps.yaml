@@ -19,7 +19,7 @@ data:
   num_negative: 50000
   num_edge_cases: 10000
   max_digits: 3
-  max_value: 999
+  max_value: 499
   seed: 42
   output_dir: "data/"
   pure_arithmetic: true

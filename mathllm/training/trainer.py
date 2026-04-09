@@ -217,7 +217,9 @@ class ARBTrainer:
     # ------------------------------------------------------------------
 
     def _lr_scale(self, step: int) -> float:
-        """Linear warmup then linear decay using 1-based training steps."""
+        """Linear warmup then cosine decay using 1-based training steps."""
+        import math
+
         if self.total_training_steps <= 0:
             return 1.0
 
@@ -228,7 +230,7 @@ class ARBTrainer:
             self.total_training_steps - self.config.warmup_steps,
             1,
         )
-        return max(0.0, 1.0 - progress)
+        return max(0.0, 0.5 * (1.0 + math.cos(math.pi * progress)))
 
     def _set_learning_rate(self, step: int) -> float:
         """Update optimizer LR for the next optimizer step."""

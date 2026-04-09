@@ -74,25 +74,34 @@ class OperandExtractor(nn.Module):
         h: Tensor,
         attention_mask: Tensor | None = None,
     ) -> Tensor:
-        """Low-rank causal attention: each position attends to itself and earlier positions."""
-        B, S, _ = h.shape
-        Q = q_proj(h)  # [B, S, rank]
-        K = k_proj(h)  # [B, S, rank]
-        attn = (Q @ K.transpose(-1, -2)) * self.scale  # [B, S, S]
+        """Low-rank causal attention in float32 for numerical stability."""
+        orig_dtype = h.dtype
+        device_type = h.device.type if h.device.type in ("cuda", "mps") else "cpu"
 
-        # Causal mask: prevent attending to future positions
-        causal = torch.triu(
-            torch.ones(S, S, device=h.device, dtype=torch.bool), diagonal=1
-        )
-        attn = attn.masked_fill(causal, -6e4)
+        # Disable autocast so all ops run in float32
+        with torch.amp.autocast(device_type=device_type, enabled=False):
+            h_f32 = h.float()
+            B, S, _ = h_f32.shape
 
-        # Padding mask: prevent attending to padding tokens
-        if attention_mask is not None:
-            pad_mask = (attention_mask == 0).unsqueeze(1)  # [B, 1, S]
-            attn = attn.masked_fill(pad_mask, -6e4)
+            Q = F.linear(h_f32, q_proj.weight.float())  # [B, S, rank]
+            K = F.linear(h_f32, k_proj.weight.float())  # [B, S, rank]
+            attn = (Q @ K.transpose(-1, -2)) * self.scale  # [B, S, S]
 
-        attn = F.softmax(attn, dim=-1)
-        return attn @ h  # [B, S, hidden_dim]
+            # Causal mask: prevent attending to future positions
+            causal = torch.triu(
+                torch.ones(S, S, device=h.device, dtype=torch.bool), diagonal=1
+            )
+            attn = attn.masked_fill(causal, -1e9)
+
+            # Padding mask: prevent attending to padding tokens
+            if attention_mask is not None:
+                pad_mask = (attention_mask == 0).unsqueeze(1)  # [B, 1, S]
+                attn = attn.masked_fill(pad_mask, -1e9)
+
+            attn = F.softmax(attn, dim=-1)
+            out = attn @ h_f32  # [B, S, hidden_dim]
+
+        return out.to(orig_dtype)
 
     def forward(
         self, h: Tensor, attention_mask: Tensor | None = None,

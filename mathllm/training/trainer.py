@@ -196,6 +196,7 @@ class ARBTrainer:
             has_aux=batch["has_aux"],
             attention_mask=batch["attention_mask"],
             eq_positions=batch["eq_position"],
+            op_positions=batch.get("op_position"),
         )
 
         aux_weight = self.config.aux_loss_weight
@@ -680,6 +681,7 @@ class ARBTrainer:
                     has_aux=batch["has_aux"],
                     attention_mask=batch["attention_mask"],
                     eq_positions=batch["eq_position"],
+                    op_positions=batch.get("op_position"),
                 )
                 total_aux += aux_loss.item()
                 num_batches += 1

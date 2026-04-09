@@ -3,10 +3,10 @@
 The key auxiliary loss directly supervises digit extraction (Stage 1) against
 ground-truth operand digits using per-digit cross-entropy classification.
 
-The loss is computed on classification logits, giving strong gradient signal
-for discrete digit prediction. A binary position mask restricts supervision
-to sequence positions at or after eq_position, where both operands have been
-seen via causal attention.
+Head A is supervised at the operator position (where operand A is most recent
+in the causal window), and head B at the '=' position (where operand B is
+most recent). This eliminates the recency bias that otherwise makes A harder
+to extract than B.
 """
 
 from __future__ import annotations
@@ -23,11 +23,13 @@ def compute_extraction_loss(
     has_aux: Tensor,
     attention_mask: Tensor,
     eq_positions: Tensor,
+    op_positions: Tensor | None = None,
 ) -> Tensor:
     """Compute cross-entropy loss between extracted logits and ground-truth digits.
 
-    Only positions at or after eq_position are supervised — earlier positions
-    cannot have seen both operands due to causal attention.
+    Head A is supervised at op_position (operator token, where A is most recent).
+    Head B is supervised at eq_position ('=' token, where B is most recent).
+    If op_positions is not provided, both heads use eq_position.
 
     Args:
         arb_extractions: {layer_id: (logits_a, logits_b)} where values are
@@ -36,7 +38,8 @@ def compute_extraction_loss(
         gt_digits_b: [B, K] ground-truth digit vector for operand B (float)
         has_aux: [B] boolean mask (True for examples with valid aux targets)
         attention_mask: [B, S] (1 = real token, 0 = padding)
-        eq_positions: [B] token index where both operands are visible
+        eq_positions: [B] token index of the '=' sign
+        op_positions: [B] token index of the operator (+, -, *, etc.)
 
     Returns:
         Scalar cross-entropy loss averaged over valid entries, or zero if none.
@@ -52,17 +55,18 @@ def compute_extraction_loss(
     target_a = gt_digits_a.long()
     target_b = gt_digits_b.long()
 
-    # Build position mask: supervise only at eq_position (the '=' token).
-    # This is the cleanest extraction point — both operands are visible via
-    # causal attention but answer tokens have not yet appeared.
+    # Position masks: head A at operator, head B at '='
     positions = torch.arange(S, device=attention_mask.device).unsqueeze(0)  # [1, S]
-    pos_mask = (positions == eq_positions.unsqueeze(1)).float()  # [B, S]
-
-    # Combined mask: has_aux AND non-padding AND position >= eq_position
-    mask = (
-        has_aux.float().unsqueeze(1)        # [B, 1]
-        * attention_mask.float()             # [B, S]
-        * pos_mask                           # [B, S]
+    pos_a = op_positions if op_positions is not None else eq_positions
+    mask_a = (
+        has_aux.float().unsqueeze(1)
+        * attention_mask.float()
+        * (positions == pos_a.unsqueeze(1)).float()
+    )  # [B, S]
+    mask_b = (
+        has_aux.float().unsqueeze(1)
+        * attention_mask.float()
+        * (positions == eq_positions.unsqueeze(1)).float()
     )  # [B, S]
 
     total_loss = gt_digits_a.new_zeros(())
@@ -85,11 +89,19 @@ def compute_extraction_loss(
             logits_b.reshape(-1, C), tgt_b.reshape(-1), reduction="none"
         ).view(B, S, K)
 
-        # Apply mask: [B, S, 1] broadcast over K digits
-        masked_ce = (ce_a + ce_b) * mask.unsqueeze(2)  # [B, S, K]
-        count = mask.sum() * K
-        if count > 0:
-            total_loss = total_loss + masked_ce.sum() / count
+        # Apply separate masks per head: [B, S, 1] broadcast over K digits
+        masked_a = ce_a * mask_a.unsqueeze(2)
+        masked_b = ce_b * mask_b.unsqueeze(2)
+
+        count_a = mask_a.sum() * K
+        count_b = mask_b.sum() * K
+        layer_loss = gt_digits_a.new_zeros(())
+        if count_a > 0:
+            layer_loss = layer_loss + masked_a.sum() / count_a
+        if count_b > 0:
+            layer_loss = layer_loss + masked_b.sum() / count_b
+
+        total_loss = total_loss + layer_loss
         num_layers += 1
 
     if num_layers > 0:

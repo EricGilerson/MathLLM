@@ -13,6 +13,7 @@ from torch.utils.data import Dataset
 
 
 _NUMBER_PATTERN = re.compile(r"-?\d[\d,]*(?:\.\d+)?")
+_OPERATOR_PATTERN = re.compile(r"[+\-*/^]")
 _ARITHMETIC_PATTERNS = (
     re.compile(r"\d[\d,]*(?:\.\d+)?\s*[+\-*/×÷^]\s*-?\d[\d,]*(?:\.\d+)?"),
     re.compile(r"\b(?:plus|minus|times|multiplied by|divided by|sum of|difference|product|quotient)\b", re.IGNORECASE),
@@ -205,8 +206,9 @@ class ArithmeticDataset(Dataset):
         self.digits_b = torch.zeros(n, self.num_digits, dtype=torch.float32)
         self.has_aux = torch.zeros(n, dtype=torch.bool)
         self.max_operand_digits = torch.zeros(n, dtype=torch.long)
-        # eq_positions will be populated after tokenization
+        # eq_positions and op_positions will be populated after tokenization
         self.eq_positions = torch.zeros(n, dtype=torch.long)
+        self.op_positions = torch.zeros(n, dtype=torch.long)
 
         for i, rec in enumerate(self.records):
             op_a = rec.get("operand_a")
@@ -275,6 +277,19 @@ class ArithmeticDataset(Dataset):
                 # answer has not yet appeared — the cleanest extraction point.
                 self.eq_positions[idx] = max(0, min(len(eq_prefix_ids) - 1, self.max_length - 1))
 
+            # Compute op_position: the operator token, where operand A is most
+            # recent.  Head A is supervised here; head B at eq_position.
+            op_match = _OPERATOR_PATTERN.search(record["text"])
+            if op_match is not None:
+                op_prefix = record["text"][:op_match.end()]
+                op_prefix_ids = self.tokenizer(
+                    op_prefix,
+                    truncation=True,
+                    max_length=self.max_length,
+                    add_special_tokens=False,
+                )["input_ids"]
+                self.op_positions[idx] = max(0, min(len(op_prefix_ids) - 1, self.max_length - 1))
+
             if target_start is None:
                 continue
 
@@ -333,6 +348,21 @@ class ArithmeticDataset(Dataset):
             else:
                 eq_position = torch.tensor(0, dtype=torch.long)
 
+            # Compute op_position dynamically for augmented text
+            op_match = _OPERATOR_PATTERN.search(text)
+            if op_match is not None:
+                op_prefix_ids = self.tokenizer(
+                    text[:op_match.end()],
+                    truncation=True,
+                    max_length=self.max_length,
+                    add_special_tokens=False,
+                )["input_ids"]
+                op_position = torch.tensor(
+                    max(0, min(len(op_prefix_ids) - 1, self.max_length - 1)), dtype=torch.long
+                )
+            else:
+                op_position = eq_position
+
             target_start = eq_char if self.answer_only_loss else None
             if target_start is not None:
                 prefix = text[:target_start]
@@ -351,6 +381,7 @@ class ArithmeticDataset(Dataset):
             attention_mask = self.encodings["attention_mask"][idx]
             labels = self.labels[idx]
             eq_position = self.eq_positions[idx]
+            op_position = self.op_positions[idx]
 
         return {
             "input_ids": input_ids,
@@ -360,6 +391,7 @@ class ArithmeticDataset(Dataset):
             "digits_b": self.digits_b[idx],
             "has_aux": self.has_aux[idx],
             "eq_position": eq_position,
+            "op_position": op_position,
         }
 
     def split(self, train_ratio: float = 0.9) -> tuple["ArithmeticDataset", "ArithmeticDataset"]:

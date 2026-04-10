@@ -25,7 +25,7 @@ arb:
   lora_layer_modules: ["self_attn.q_proj", "self_attn.v_proj", "mlp.down_proj"]
 
 data:
-  num_positive: 100000
+  num_positive: 500000
   num_negative: 0
   num_edge_cases: 0
   max_digits: 3
@@ -39,7 +39,7 @@ training:
   base_model: "HuggingFaceTB/SmolLM2-360M"
   lr: 5.0e-4
   weight_decay: 0.01
-  batch_size: 64
+  batch_size: 1024
   max_epochs: 200
   checkpoint_every_steps: 0
   max_seq_len: 64
@@ -54,7 +54,7 @@ training:
   answer_only_loss: true
   early_stopping_patience: 50
   max_eval_batches: 20
-  eval_batch_size: 128
+  eval_batch_size: 64
   phase1_epochs: 0
   phase2_epochs: 50
   phase3_epochs: 50

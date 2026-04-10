@@ -342,7 +342,7 @@ class ARBTrainer:
             torch.set_rng_state(torch_state.cpu().byte())
         cuda_state = state.get("cuda")
         if cuda_state is not None and torch.cuda.is_available():
-            torch.cuda.set_rng_state_all(cuda_state)
+            torch.cuda.set_rng_state_all([s.cpu().byte() for s in cuda_state])
 
     # ------------------------------------------------------------------
     # Training loop

@@ -3,7 +3,7 @@ rns:
   num_digit_slots: 6
 
 arb:
-  layer_positions: [4, 8, 10]
+  layer_positions: [10, 20, 26]
   softmax_temperature: 1000.0
   num_results: 5
   dropout: 0.1
@@ -17,20 +17,20 @@ data:
   num_positive: 500
   num_negative: 500
   num_edge_cases: 100
-  max_digits: 5
-  max_value: 100000
+  max_digits: 3
+  max_value: 499
   seed: 42
   output_dir: "data_debug/"
   pure_arithmetic: true
 
 training:
-  base_model: "gpt2"
+  base_model: "HuggingFaceTB/SmolLM2-135M"
   lr: 1.0e-3
   weight_decay: 0.01
   batch_size: 16
   max_epochs: 10
   checkpoint_every_steps: 0
-  max_seq_len: 32
+  max_seq_len: 48
   warmup_steps: 5
   grad_clip: 1.0
   log_every: 10
@@ -39,12 +39,12 @@ training:
   final_model_dir: "trained_model_debug/"
   auto_resume_latest: true
   device: "auto"
-  answer_only_loss: false
+  answer_only_loss: true
   early_stopping_patience: 3
   max_eval_batches: 10
-  phase1_epochs: 5
-  phase2_epochs: 3
-  phase3_epochs: 2
+  phase1_epochs: 0
+  phase2_epochs: 7
+  phase3_epochs: 3
   aux_loss_weight: 1.0
   aux_loss_decay: 0.1
   phase1_aux_only: true

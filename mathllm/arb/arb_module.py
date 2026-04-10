@@ -17,13 +17,13 @@ import torch
 import torch.nn as nn
 from torch import Tensor
 
-# GPT-2 token ID for '='
-_EQ_TOKEN_ID = 28
-
 from mathllm.arb.stage1_extract import OperandExtractor
 from mathllm.arb.stage2_encode import RNSCircleEncoder
 from mathllm.arb.stage3_compute import ArithmeticCompute
 from mathllm.arb.stage4_inject import ResultInjector
+
+# Legacy default for GPT-2 ('=' is token 28)
+_DEFAULT_EQ_TOKEN_ID = 28
 
 
 class ArithmeticResidualBlock(nn.Module):
@@ -48,11 +48,13 @@ class ArithmeticResidualBlock(nn.Module):
         mlp_hidden: int = 128,
         use_attention: bool = False,
         attn_rank: int = 32,
+        eq_token_id: int = _DEFAULT_EQ_TOKEN_ID,
     ):
         super().__init__()
         self.hidden_dim = hidden_dim
         self.num_digits = num_digits
         self.num_results = num_results
+        self.eq_token_id = eq_token_id
 
         # Each operation outputs m primes * 2 (cos, sin) = 2m dimensions
         num_primes = len(primes)
@@ -129,7 +131,7 @@ class ArithmeticResidualBlock(nn.Module):
         # Build injection mask: only inject at '=' position and after.
         # For inputs without '=', no injection occurs.
         B, S = input_ids.shape
-        eq_present = (input_ids == _EQ_TOKEN_ID)  # [B, S]
+        eq_present = (input_ids == self.eq_token_id)  # [B, S]
         # Find first '=' in each sequence; if none, set to S (past end)
         has_eq = eq_present.any(dim=1)  # [B]
         eq_pos = torch.where(

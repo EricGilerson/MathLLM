@@ -9,7 +9,7 @@ import sys
 sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent.parent))
 
 import torch
-from transformers import GPT2Tokenizer
+from transformers import AutoTokenizer
 
 from mathllm.config import load_config
 from mathllm.evaluation.evaluator import ARBEvaluator
@@ -46,7 +46,7 @@ def main():
         )
     else:
         # Load tokenizer and model
-        tokenizer = GPT2Tokenizer.from_pretrained(config.training.base_model)
+        tokenizer = AutoTokenizer.from_pretrained(config.training.base_model)
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
 

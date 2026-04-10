@@ -13,7 +13,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import torch
-from transformers import GPT2Tokenizer
+from transformers import AutoTokenizer
 
 from mathllm.config import Config, load_config
 from mathllm.model.gpt2_arb import GPT2WithARB
@@ -143,12 +143,12 @@ def load_checkpointed_model(
     config_path: str,
     checkpoint_path: str | None,
     device: torch.device,
-) -> tuple[GPT2WithARB, GPT2Tokenizer, Config, Path]:
+) -> tuple[GPT2WithARB, object, Config, Path]:
     """Build the model and load ARB weights from a checkpoint."""
     config = load_config(config_path)
     resolved_checkpoint = resolve_checkpoint_path(config, checkpoint_path)
 
-    tokenizer = GPT2Tokenizer.from_pretrained(config.training.base_model)
+    tokenizer = AutoTokenizer.from_pretrained(config.training.base_model)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 

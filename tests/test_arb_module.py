@@ -16,7 +16,8 @@ def _build_test_arb(hidden_dim=64, **kwargs):
         for d in range(10):
             table[i, d] = v % 10
             v //= 10
-    arb.extract.token_digits = table
+    arb.extract.register_buffer("token_digits_full", table, persistent=True)
+    arb.extract._per_digit = False
     # Set up operator detection: token 10 = '+', token 12 = '-'
     op_ids = torch.zeros(100, dtype=torch.bool)
     op_ids[10] = True  # +

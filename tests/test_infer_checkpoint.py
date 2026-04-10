@@ -9,14 +9,6 @@ from mathllm.config import Config
 from scripts import infer_checkpoint
 
 
-def _make_logits_for_digits(digits: list[int], *, num_classes: int = 10) -> torch.Tensor:
-    """Build a [K, C] logit tensor whose argmax matches the requested digits."""
-    logits = torch.full((len(digits), num_classes), -10.0)
-    for idx, digit in enumerate(digits):
-        logits[idx, digit] = 10.0
-    return logits
-
-
 class _FakeTokenizer:
     """Tokenizer stub for checkpoint loader tests."""
 
@@ -46,48 +38,30 @@ class _FakeModel(nn.Module):
         self.arbs = nn.ModuleDict({"4": _FakeARB()})
         self.moved_to = None
 
+    def build_token_digit_tables(self, tokenizer):
+        pass
+
     def to(self, device):
         self.moved_to = device
         return self
 
 
 class TestInferCheckpointHelpers:
-    def test_collect_layer_extractions_decodes_last_token_logits(self):
-        logits_a_layer4 = torch.stack(
-            [
-                _make_logits_for_digits([0, 0, 0]),
-                _make_logits_for_digits([7, 4, 3]),
-            ],
-            dim=0,
-        ).unsqueeze(0)
-        logits_b_layer4 = torch.stack(
-            [
-                _make_logits_for_digits([0, 0, 0]),
-                _make_logits_for_digits([1, 9, 2]),
-            ],
-            dim=0,
-        ).unsqueeze(0)
-        logits_a_layer8 = torch.stack(
-            [
-                _make_logits_for_digits([0, 0, 0]),
-                _make_logits_for_digits([5, 5, 0]),
-            ],
-            dim=0,
-        ).unsqueeze(0)
-        logits_b_layer8 = torch.stack(
-            [
-                _make_logits_for_digits([0, 0, 0]),
-                _make_logits_for_digits([2, 1, 0]),
-            ],
-            dim=0,
-        ).unsqueeze(0)
+    def test_collect_layer_extractions_decodes_digit_vectors(self):
+        # Digit vectors are [B, S, K] with raw digit values (LSB-first)
+        # 347 = [7, 4, 3], 291 = [1, 9, 2]
+        d_a_layer4 = torch.tensor([[[0, 0, 0], [7, 4, 3]]], dtype=torch.float)
+        d_b_layer4 = torch.tensor([[[0, 0, 0], [1, 9, 2]]], dtype=torch.float)
+        # 55 = [5, 5, 0], 12 = [2, 1, 0]
+        d_a_layer8 = torch.tensor([[[0, 0, 0], [5, 5, 0]]], dtype=torch.float)
+        d_b_layer8 = torch.tensor([[[0, 0, 0], [2, 1, 0]]], dtype=torch.float)
 
         extractions = infer_checkpoint.collect_layer_extractions(
             {
-                8: (logits_a_layer8, logits_b_layer8),
-                4: (logits_a_layer4, logits_b_layer4),
+                8: (d_a_layer8, d_b_layer8),
+                4: (d_a_layer4, d_b_layer4),
             },
-            token_index=1,
+            eq_index=1,
         )
 
         assert [item.layer_id for item in extractions] == [4, 8]
@@ -112,9 +86,9 @@ class TestInferCheckpointHelpers:
             ]
         )
 
-        assert "layer 4 @ token 5" in formatted
-        assert "a_digits=[7, 4, 3, 0]" in formatted
-        assert "b_value=291" in formatted
+        assert "layer 4" in formatted
+        assert "val=347" in formatted
+        assert "val=291" in formatted
 
     def test_resolve_checkpoint_path_uses_latest_when_unspecified(self, tmp_path):
         config = Config()
@@ -135,7 +109,7 @@ class TestInferCheckpointHelpers:
         config.training.checkpoint_dir = str(tmp_path)
 
         monkeypatch.setattr(infer_checkpoint, "load_config", lambda _path: config)
-        monkeypatch.setattr(infer_checkpoint, "GPT2Tokenizer", _FakeTokenizer)
+        monkeypatch.setattr(infer_checkpoint, "AutoTokenizer", _FakeTokenizer)
         monkeypatch.setattr(infer_checkpoint, "GPT2WithARB", _FakeModel)
         monkeypatch.setattr(
             infer_checkpoint.torch,

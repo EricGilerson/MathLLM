@@ -3,7 +3,7 @@ rns:
   num_digit_slots: 6
 
 arb:
-  layer_positions: [4, 8, 10]
+  layer_positions: [10, 20, 26]
   softmax_temperature: 1000.0
   num_results: 5  # add, sub, mul, exp, div
   dropout: 0.1  # dropout on extraction and injection layers
@@ -25,13 +25,13 @@ data:
   pure_arithmetic: true
 
 training:
-  base_model: "gpt2"
+  base_model: "HuggingFaceTB/SmolLM2-135M"
   lr: 1.0e-3
   weight_decay: 0.01
   batch_size: 64
   max_epochs: 50
   checkpoint_every_steps: 0
-  max_seq_len: 32
+  max_seq_len: 48
   warmup_steps: 10
   grad_clip: 1.0
   log_every: 50
@@ -40,7 +40,7 @@ training:
   final_model_dir: "trained_model/"
   auto_resume_latest: true
   device: "auto"
-  answer_only_loss: false  # full next-token loss for richer gradients
+  answer_only_loss: true  # focus loss on answer tokens where ARB can help
   early_stopping_patience: 3  # stop if eval loss doesn't improve for N evals
   max_eval_batches: 5
   eval_batch_size: 128

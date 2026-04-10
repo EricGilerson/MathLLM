@@ -10,7 +10,7 @@ sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent.par
 
 import torch
 from torch.utils.data import DataLoader
-from transformers import GPT2Tokenizer
+from transformers import AutoTokenizer
 
 from mathllm.config import load_config
 from mathllm.data.dataset import ArithmeticDataset
@@ -46,7 +46,7 @@ def main():
     logger.info(f"Using device: {device}")
 
     # Load tokenizer
-    tokenizer = GPT2Tokenizer.from_pretrained(config.training.base_model)
+    tokenizer = AutoTokenizer.from_pretrained(config.training.base_model)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 

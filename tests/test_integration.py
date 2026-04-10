@@ -20,13 +20,22 @@ def config():
     return cfg
 
 
+def _build_model_with_tables(config):
+    """Build model and initialize token digit tables."""
+    from transformers import AutoTokenizer
+    from mathllm.model.gpt2_arb import GPT2WithARB
+
+    model = GPT2WithARB(config)
+    tokenizer = AutoTokenizer.from_pretrained(config.training.base_model)
+    model.build_token_digit_tables(tokenizer)
+    return model
+
+
 @pytest.mark.slow
 class TestModelIntegration:
     def test_forward_pass(self, config):
         """Model should produce logits and loss."""
-        from mathllm.model.gpt2_arb import GPT2WithARB
-
-        model = GPT2WithARB(config)
+        model = _build_model_with_tables(config)
         input_ids = torch.tensor([[50, 347, 12, 291, 796]])
         labels = input_ids.clone()
 
@@ -47,10 +56,8 @@ class TestModelIntegration:
         """With zero W_proj, output should match unmodified GPT-2."""
         from transformers import GPT2LMHeadModel
 
-        from mathllm.model.gpt2_arb import GPT2WithARB
-
         config.arb.injector_init_std = 0.0
-        model = GPT2WithARB(config)
+        model = _build_model_with_tables(config)
         base = GPT2LMHeadModel.from_pretrained("gpt2", attn_implementation="eager")
         base.eval()
         model.eval()
@@ -66,9 +73,7 @@ class TestModelIntegration:
 
     def test_gradient_flow(self, config):
         """ARB parameters should receive gradients after backward pass."""
-        from mathllm.model.gpt2_arb import GPT2WithARB
-
-        model = GPT2WithARB(config)
+        model = _build_model_with_tables(config)
         # Set W_proj non-zero to enable gradient flow
         for arb in model.arbs.values():
             with torch.no_grad():
@@ -89,9 +94,7 @@ class TestModelIntegration:
 
     def test_only_arb_params_trainable(self, config):
         """Only ARB learned params should have requires_grad=True."""
-        from mathllm.model.gpt2_arb import GPT2WithARB
-
-        model = GPT2WithARB(config)
+        model = _build_model_with_tables(config)
         trainable = model.get_trainable_parameters()
         assert len(trainable) > 0
 
@@ -101,9 +104,7 @@ class TestModelIntegration:
 
     def test_generate(self, config):
         """Model should be able to generate tokens."""
-        from mathllm.model.gpt2_arb import GPT2WithARB
-
-        model = GPT2WithARB(config)
+        model = _build_model_with_tables(config)
         model.eval()
         input_ids = torch.tensor([[50, 347]])
 
@@ -112,9 +113,7 @@ class TestModelIntegration:
 
     def test_attention_mask(self, config):
         """Model should handle attention masks correctly."""
-        from mathllm.model.gpt2_arb import GPT2WithARB
-
-        model = GPT2WithARB(config)
+        model = _build_model_with_tables(config)
         input_ids = torch.tensor([[50, 347, 12, 0, 0]])
         attention_mask = torch.tensor([[1, 1, 1, 0, 0]])
         labels = input_ids.clone()

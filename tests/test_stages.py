@@ -16,36 +16,60 @@ from mathllm.arb.stage3_compute import ArithmeticCompute
 
 
 class TestOperandExtractor:
+    def _build_extractor(self, num_digits=10):
+        """Build an extractor with a test digit table (single-token style)."""
+        ext = OperandExtractor(hidden_dim=64, num_digits=num_digits)
+        # Build digit table: token IDs 0-99 map to their digit vectors
+        table = torch.zeros(100, num_digits)
+        for i in range(100):
+            v = i
+            for d in range(num_digits):
+                table[i, d] = v % 10
+                v //= 10
+        ext.register_buffer("token_digits_full", table, persistent=True)
+        ext._per_digit = False
+        # Operators: token 10 = '+', token 12 = '-'
+        is_op = torch.zeros(100, dtype=torch.bool)
+        is_op[10] = True
+        is_op[12] = True
+        ext.is_operator = is_op
+        return ext
+
     def test_output_shape(self):
-        ext = OperandExtractor(hidden_dim=64, num_digits=10)
+        ext = self._build_extractor()
         h = torch.randn(2, 5, 64)
-        d_a, d_b, logits_a, logits_b = ext(h)
+        # "25 + 50 = ?" -> tokens [25, 10(+), 50, 28(=), 99]
+        input_ids = torch.tensor([[25, 10, 50, 28, 99], [30, 12, 40, 28, 99]])
+        d_a, d_b, _, _ = ext(h, input_ids)
         assert d_a.shape == (2, 5, 10)
         assert d_b.shape == (2, 5, 10)
-        assert logits_a.shape == (2, 5, 10, 10)
-        assert logits_b.shape == (2, 5, 10, 10)
 
     def test_output_range(self):
-        ext = OperandExtractor(hidden_dim=64, num_digits=10)
-        h = torch.randn(2, 5, 64) * 10  # large inputs
-        d_a, d_b, _, _ = ext(h)
+        ext = self._build_extractor()
+        h = torch.randn(2, 5, 64)
+        input_ids = torch.tensor([[25, 10, 50, 28, 99], [30, 12, 40, 28, 99]])
+        d_a, d_b, _, _ = ext(h, input_ids)
         assert (d_a >= 0).all() and (d_a <= 9).all()
         assert (d_b >= 0).all() and (d_b <= 9).all()
 
     def test_output_integers(self):
-        ext = OperandExtractor(hidden_dim=64, num_digits=10)
+        ext = self._build_extractor()
         h = torch.randn(2, 5, 64)
-        d_a, _, _, _ = ext(h)
+        input_ids = torch.tensor([[25, 10, 50, 28, 99], [30, 12, 40, 28, 99]])
+        d_a, _, _, _ = ext(h, input_ids)
         assert torch.equal(d_a, d_a.round())
 
-    def test_gradient_flow(self):
-        ext = OperandExtractor(hidden_dim=64, num_digits=10)
-        h = torch.randn(2, 5, 64, requires_grad=True)
-        d_a, d_b, _, _ = ext(h)
-        loss = (d_a.sum() + d_b.sum())
-        loss.backward()
-        assert h.grad is not None
-        assert h.grad.abs().sum() > 0
+    def test_deterministic_no_gradients(self):
+        """Deterministic extraction should not depend on hidden state."""
+        ext = self._build_extractor()
+        h = torch.randn(1, 4, 64, requires_grad=True)
+        input_ids = torch.tensor([[25, 10, 50, 28]])
+        d_a, d_b, _, _ = ext(h, input_ids)
+        # Digits should be exact: 25 -> [5,2,0,...], 50 -> [0,5,0,...]
+        assert d_a[0, 0, 0].item() == 5
+        assert d_a[0, 0, 1].item() == 2
+        assert d_b[0, 0, 0].item() == 0
+        assert d_b[0, 0, 1].item() == 5
 
 
 class TestRNSCircleEncoder:

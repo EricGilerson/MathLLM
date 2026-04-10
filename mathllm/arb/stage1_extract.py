@@ -1,16 +1,16 @@
 """Stage 1: Deterministic Operand Extraction via Token Lookup.
 
-Extraction is fully deterministic — no learned parameters:
+Extraction is fully deterministic — no learned parameters.
 
-1. A frozen lookup table maps every token ID to its digit vector (e.g., token
-   "300" → [0, 0, 3, 0, 0, 0]). Non-number tokens map to zeros.
-2. Operator tokens (+, -, *, /, ^) are identified by their token IDs.
-3. Operand A is the token immediately before the operator.
-   Operand B is the token immediately after the operator.
-4. Digit vectors are looked up directly — no attention, no MLP.
+Supports two tokenization styles:
+- **Single-token numbers** (GPT-2): "300" is one token → direct lookup
+- **Per-digit numbers** (SmolLM2, etc.): "300" is ['3','0','0'] → collect & assemble
 
-This removes all learning from Stage 1, making extraction exact by
-construction. Only Stage 4 (injection) needs to be trained.
+The extractor:
+1. Builds a frozen lookup table mapping token IDs to digit values.
+2. Finds the operator token (+, -, *, /, ^) by scanning input_ids.
+3. Collects digit tokens before the operator (operand A) and after (operand B).
+4. Assembles digit vectors in LSB-first format.
 """
 
 from __future__ import annotations
@@ -20,21 +20,11 @@ import torch.nn as nn
 from torch import Tensor
 
 
-# GPT-2 token IDs for arithmetic operators
-_OPERATOR_TOKEN_IDS = {
-    10,   # +
-    12,   # -
-    9,    # *
-    14,   # /
-    61,   # ^
-}
-
-
 class OperandExtractor(nn.Module):
     """Deterministic operand extraction via token ID lookup.
 
     No learned parameters. Scans input_ids for operator tokens,
-    then looks up digit vectors for the adjacent number tokens.
+    collects adjacent digit tokens, and assembles digit vectors.
     """
 
     def __init__(
@@ -50,54 +40,154 @@ class OperandExtractor(nn.Module):
         super().__init__()
         self.num_digits = num_digits
 
-        # Token lookup table — built by build_token_digits_table()
+        # These buffers are properly sized by build_token_digits_table()
+        # Placeholder until then:
         self.register_buffer(
-            "token_digits", torch.zeros(1, num_digits), persistent=True
+            "token_digit_value", torch.full((1,), -1, dtype=torch.long),
+            persistent=True,
         )
-
-        # Operator token IDs as a buffer for efficient lookup
-        op_ids = torch.zeros(50257, dtype=torch.bool)  # GPT-2 vocab size
-        for tid in _OPERATOR_TOKEN_IDS:
-            op_ids[tid] = True
-        self.register_buffer("is_operator", op_ids, persistent=True)
+        self.register_buffer(
+            "is_operator", torch.zeros(1, dtype=torch.bool),
+            persistent=True,
+        )
+        # Whether this tokenizer uses per-digit tokenization
+        self._per_digit = False
 
     def build_token_digits_table(self, tokenizer) -> None:
-        """Build frozen lookup: token_id -> digit vector [V, K].
+        """Build frozen lookup tables from the tokenizer.
 
-        Must be called once after construction with the model's tokenizer.
-        Non-number tokens get all-zero digit vectors.
+        Creates:
+        - token_digit_value[V]: single-digit value (0-9) for digit tokens, -1 otherwise
+        - is_operator[V]: True for operator tokens
+        - _per_digit: True if numbers are tokenized as individual digits
+
+        Also works for tokenizers where "300" is a single token (GPT-2 style).
         """
         vocab_size = tokenizer.vocab_size
-        table = torch.zeros(vocab_size, self.num_digits)
+
+        # Map each token to its digit value (-1 = not a digit)
+        digit_val = torch.full((vocab_size,), -1, dtype=torch.long)
+        # Track which tokens are multi-digit numbers (for GPT-2 style)
+        multi_digit_table = {}
 
         for token_id in range(vocab_size):
             text = tokenizer.decode([token_id]).strip()
-            if text.isascii() and text.isdigit():
-                value = int(text)
-                for d in range(self.num_digits):
-                    table[token_id, d] = value % 10
-                    value //= 10
+            if not text.isascii():
+                continue
+            if text.isdigit():
+                val = int(text)
+                if val <= 9:
+                    digit_val[token_id] = val
+                else:
+                    # Multi-digit number token (GPT-2 style)
+                    multi_digit_table[token_id] = val
 
-        self.token_digits = table.to(self.token_digits.device)
+        # Detect tokenization style: check if "300" is one token or multiple
+        test_ids = tokenizer.encode("300", add_special_tokens=False)
+        self._per_digit = len(test_ids) > 1
+
+        # For single-token number tokenizers, also store full number → digit vectors
+        if not self._per_digit and multi_digit_table:
+            # Build a [V, K] table for direct lookup (GPT-2 style)
+            full_table = torch.zeros(vocab_size, self.num_digits)
+            # Single digits
+            for tid in range(vocab_size):
+                if digit_val[tid] >= 0:
+                    full_table[tid, 0] = digit_val[tid].item()
+            # Multi-digit numbers
+            for tid, val in multi_digit_table.items():
+                for d in range(self.num_digits):
+                    full_table[tid, d] = val % 10
+                    val //= 10
+            self.register_buffer("token_digits_full", full_table, persistent=True)
+
+        # Build operator mask
+        is_op = torch.zeros(vocab_size, dtype=torch.bool)
+        for op_char in ['+', '-', '*', '/', '^']:
+            op_ids = tokenizer.encode(op_char, add_special_tokens=False)
+            if len(op_ids) == 1:
+                is_op[op_ids[0]] = True
+
+        self.token_digit_value = digit_val
+        self.is_operator = is_op
 
     def _find_operator_positions(self, input_ids: Tensor) -> Tensor:
-        """Find the position of the first operator token in each sequence.
-
-        Args:
-            input_ids: [B, S]
-
-        Returns:
-            op_pos: [B] index of the first operator token (0 if none found)
-        """
-        B, S = input_ids.shape
-        # Look up which tokens are operators: [B, S]
+        """Find the position of the first operator token in each sequence."""
         ids_clamped = input_ids.clamp(0, self.is_operator.size(0) - 1)
         is_op = self.is_operator[ids_clamped]  # [B, S] bool
-
-        # Find first operator position per sequence
-        # Use argmax on the bool tensor — returns first True index, or 0 if none
         op_pos = is_op.long().argmax(dim=1)  # [B]
         return op_pos
+
+    def _extract_single_token(
+        self, input_ids: Tensor, op_pos: Tensor
+    ) -> tuple[Tensor, Tensor]:
+        """Extract operands for single-token number tokenizers (GPT-2 style).
+
+        Operand A is the token at op_pos - 1, operand B at op_pos + 1.
+        """
+        B, S = input_ids.shape
+        a_pos = (op_pos - 1).clamp(min=0)
+        b_pos = (op_pos + 1).clamp(max=S - 1)
+
+        a_ids = input_ids.gather(1, a_pos.unsqueeze(1)).squeeze(1)
+        b_ids = input_ids.gather(1, b_pos.unsqueeze(1)).squeeze(1)
+
+        a_clamped = a_ids.clamp(0, self.token_digits_full.size(0) - 1)
+        b_clamped = b_ids.clamp(0, self.token_digits_full.size(0) - 1)
+
+        d_a = self.token_digits_full[a_clamped]  # [B, K]
+        d_b = self.token_digits_full[b_clamped]  # [B, K]
+        return d_a, d_b
+
+    def _extract_per_digit(
+        self, input_ids: Tensor, op_pos: Tensor
+    ) -> tuple[Tensor, Tensor]:
+        """Extract operands for per-digit tokenizers (SmolLM2 style).
+
+        Collects consecutive digit tokens before the operator (A) and
+        between the operator and '=' (B), then assembles LSB-first.
+        """
+        B, S = input_ids.shape
+        K = self.num_digits
+        device = input_ids.device
+
+        # Get digit values for each token: [B, S], -1 for non-digits
+        ids_clamped = input_ids.clamp(0, self.token_digit_value.size(0) - 1)
+        dv = self.token_digit_value[ids_clamped]  # [B, S]
+
+        d_a = torch.zeros(B, K, device=device)
+        d_b = torch.zeros(B, K, device=device)
+
+        # Process each batch element
+        # (vectorized would be complex; batch sizes are small enough)
+        for b in range(B):
+            op = op_pos[b].item()
+
+            # Operand A: digit tokens from 0..op-1 (MSB first in text order)
+            a_digits = []
+            for i in range(op - 1, -1, -1):
+                v = dv[b, i].item()
+                if v < 0:
+                    break
+                a_digits.append(v)
+            # a_digits is now LSB-first (we walked right to left)
+            for i, v in enumerate(a_digits):
+                if i < K:
+                    d_a[b, i] = v
+
+            # Operand B: digit tokens from op+1..end (MSB first in text order)
+            b_digits_msb = []
+            for i in range(op + 1, S):
+                v = dv[b, i].item()
+                if v < 0:
+                    break
+                b_digits_msb.append(v)
+            # Reverse to LSB-first
+            for i, v in enumerate(reversed(b_digits_msb)):
+                if i < K:
+                    d_b[b, i] = v
+
+        return d_a, d_b
 
     def forward(
         self,
@@ -106,10 +196,6 @@ class OperandExtractor(nn.Module):
         attention_mask: Tensor | None = None,
     ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
         """Deterministic operand extraction.
-
-        Finds the operator token, looks up digit vectors for adjacent tokens.
-        Returns the same digit vector at every sequence position (broadcast)
-        so downstream stages can use any position.
 
         Args:
             h: Hidden state [batch, seq_len, hidden_dim] (unused, kept for API)
@@ -125,22 +211,12 @@ class OperandExtractor(nn.Module):
         B, S = input_ids.shape
         K = self.num_digits
 
-        # Find operator positions
-        op_pos = self._find_operator_positions(input_ids)  # [B]
+        op_pos = self._find_operator_positions(input_ids)
 
-        # Operand A is at op_pos - 1, operand B is at op_pos + 1
-        a_pos = (op_pos - 1).clamp(min=0)  # [B]
-        b_pos = (op_pos + 1).clamp(max=S - 1)  # [B]
-
-        # Gather the token IDs at operand positions
-        a_token_ids = input_ids.gather(1, a_pos.unsqueeze(1)).squeeze(1)  # [B]
-        b_token_ids = input_ids.gather(1, b_pos.unsqueeze(1)).squeeze(1)  # [B]
-
-        # Look up digit vectors: [B, K]
-        a_ids_clamped = a_token_ids.clamp(0, self.token_digits.size(0) - 1)
-        b_ids_clamped = b_token_ids.clamp(0, self.token_digits.size(0) - 1)
-        d_a_flat = self.token_digits[a_ids_clamped]  # [B, K]
-        d_b_flat = self.token_digits[b_ids_clamped]  # [B, K]
+        if self._per_digit:
+            d_a_flat, d_b_flat = self._extract_per_digit(input_ids, op_pos)
+        else:
+            d_a_flat, d_b_flat = self._extract_single_token(input_ids, op_pos)
 
         # Broadcast to all sequence positions: [B, K] -> [B, S, K]
         d_a = d_a_flat.unsqueeze(1).expand(B, S, K)

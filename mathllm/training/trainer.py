@@ -650,7 +650,7 @@ class ARBTrainer:
     def _checkpoint_payload(self) -> dict[str, object]:
         """Build the full checkpoint payload."""
         arb_state = {key: arb.state_dict() for key, arb in self.model.arbs.items()}
-        return {
+        payload = {
             "arb_state": arb_state,
             "optimizer": self.optimizer.state_dict(),
             "global_step": self.global_step,
@@ -664,6 +664,10 @@ class ARBTrainer:
             "last_aux_eval": self._last_aux_eval,
             "rng_state": self._capture_rng_state(),
         }
+        # Save LoRA state if active
+        if hasattr(self.model, "lora_head") and self.model.lora_head is not None:
+            payload["lora_state"] = self.model.lora_head.state_dict()
+        return payload
 
     def _save_checkpoint(self, name: str) -> None:
         """Save a resumable checkpoint and refresh the latest pointer."""
@@ -684,6 +688,10 @@ class ARBTrainer:
         ckpt = torch.load(path, map_location=self.device, weights_only=False)
         for key, state in ckpt["arb_state"].items():
             self.model.arbs[key].load_state_dict(state)
+
+        # Restore LoRA state if present
+        if "lora_state" in ckpt and hasattr(self.model, "lora_head") and self.model.lora_head is not None:
+            self.model.lora_head.load_state_dict(ckpt["lora_state"])
 
         self.global_step = ckpt["global_step"]
         saved_steps_per_epoch = ckpt.get("steps_per_epoch", self.steps_per_epoch)

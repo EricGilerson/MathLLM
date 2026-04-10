@@ -1,11 +1,11 @@
 """Stage 4: Learned Result Injection.
 
 Projects concatenated result digit vectors back into the transformer hidden state
-via a learned linear projection. Uses a residual connection: h' = h + W_proj(results).
+via a learned projection. Uses a residual connection: h' = h + gate * proj(results).
 
-The default initialization is very small but non-zero so the ARB starts close to
-the frozen base model while still allowing gradients to reach the extraction
-layers from the first update step.
+Supports both linear and MLP projection modes. The MLP provides nonlinear
+capacity to produce stronger, more targeted perturbations that can override
+the frozen base model's existing biases.
 """
 
 from __future__ import annotations
@@ -29,31 +29,42 @@ class ResultInjector(nn.Module):
         dropout: float = 0.1,
         init_std: float = 1e-3,
         gate_init_logit: float = -2.0,
+        mlp_hidden: int = 0,
     ):
         """
         Args:
             hidden_dim: Transformer hidden dimension (e.g. 768 for GPT-2)
             result_dim: Total dimension of concatenated result vectors
-                        (e.g. 4 * (K+1) = 4 * 11 = 44 for 4 ops with sign)
             dropout: Dropout rate on the projected delta before injection.
-                     Prevents the injection from always firing on every token.
-            init_std: Stddev for the projection weight init. Set to 0.0 to
-                      recover exact identity-at-init behavior.
+            init_std: Stddev for the final projection weight init.
             gate_init_logit: Initial logit for the learnable injection gate.
-                             sigmoid(-2) ~ 0.12 starts small but learnable.
+            mlp_hidden: Hidden dim for MLP injection. 0 = linear projection.
         """
         super().__init__()
-        self.projection = nn.Linear(result_dim, hidden_dim)
-        self.dropout = nn.Dropout(dropout)
         self.gate_logit = nn.Parameter(torch.tensor(gate_init_logit))
+        self.dropout = nn.Dropout(dropout)
 
-        # Small non-zero init keeps the block near-identity while allowing
-        # gradients to reach earlier ARB stages immediately.
-        if init_std == 0.0:
-            nn.init.zeros_(self.projection.weight)
+        if mlp_hidden > 0:
+            self.projection = nn.Sequential(
+                nn.Linear(result_dim, mlp_hidden),
+                nn.GELU(),
+                nn.Linear(mlp_hidden, hidden_dim),
+            )
+            # Init: first layer with reasonable scale, final layer small
+            nn.init.kaiming_normal_(self.projection[0].weight)
+            nn.init.zeros_(self.projection[0].bias)
+            if init_std == 0.0:
+                nn.init.zeros_(self.projection[2].weight)
+            else:
+                nn.init.normal_(self.projection[2].weight, mean=0.0, std=init_std)
+            nn.init.zeros_(self.projection[2].bias)
         else:
-            nn.init.normal_(self.projection.weight, mean=0.0, std=init_std)
-        nn.init.zeros_(self.projection.bias)
+            self.projection = nn.Linear(result_dim, hidden_dim)
+            if init_std == 0.0:
+                nn.init.zeros_(self.projection.weight)
+            else:
+                nn.init.normal_(self.projection.weight, mean=0.0, std=init_std)
+            nn.init.zeros_(self.projection.bias)
 
     def forward(self, results: Tensor, h: Tensor) -> Tensor:
         """Inject results into hidden state via gated residual connection.
@@ -65,9 +76,13 @@ class ResultInjector(nn.Module):
         Returns:
             h': [batch, seq, hidden_dim] — h + gate * delta_h
         """
-        # Compute in the projection's dtype (float32) for gradient precision,
-        # then cast delta to match the hidden state dtype (may be float16).
-        results = results.to(dtype=self.projection.weight.dtype)
+        # Get the weight tensor for dtype reference (works for both Linear and Sequential)
+        if isinstance(self.projection, nn.Sequential):
+            proj_dtype = self.projection[0].weight.dtype
+        else:
+            proj_dtype = self.projection.weight.dtype
+
+        results = results.to(dtype=proj_dtype)
         gate = torch.sigmoid(self.gate_logit)
         delta_h = self.projection(results)
         delta_h = self.dropout(delta_h)

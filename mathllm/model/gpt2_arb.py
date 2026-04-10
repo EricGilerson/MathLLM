@@ -34,6 +34,7 @@ logger = logging.getLogger(__name__)
 
 from mathllm.arb.arb_module import ArithmeticResidualBlock
 from mathllm.config import Config, load_config, save_config
+from mathllm.model.lora import LoRALinear
 from mathllm.model.utils import freeze_parameters
 
 
@@ -145,7 +146,24 @@ class TransformerWithARB(nn.Module):
                 use_attention=config.arb.extraction_use_attention,
                 attn_rank=config.arb.extraction_attn_rank,
                 eq_token_id=self._eq_token_id,
+                injection_pos_dim=config.arb.injection_pos_dim,
+                injection_mlp_hidden=config.arb.injection_mlp_hidden,
             )
+
+        # LoRA adapter on LM head (optional)
+        lora_rank = getattr(config.arb, "lora_rank", 0)
+        if lora_rank > 0:
+            lora_alpha = getattr(config.arb, "lora_alpha", 1.0)
+            self.lora_head = LoRALinear(
+                self.base_model.lm_head, rank=lora_rank, alpha=lora_alpha
+            )
+            logger.info(
+                "LoRA head created: rank=%d, alpha=%.1f, params=%d",
+                lora_rank, lora_alpha,
+                sum(p.numel() for p in self.lora_head.parameters() if p.requires_grad),
+            )
+        else:
+            self.lora_head = None
 
     def _setup_gpt2(self) -> None:
         """GPT-2-specific forward pass setup."""
@@ -297,9 +315,12 @@ class TransformerWithARB(nn.Module):
                 )
                 arb_extractions[i] = (d_a, d_b)
 
-        # Final layer norm + LM head
+        # Final layer norm + LM head (with optional LoRA)
         hidden_states = transformer.ln_f(hidden_states)
-        logits = self.base_model.lm_head(hidden_states)
+        if self.lora_head is not None:
+            logits = self.lora_head(hidden_states)
+        else:
+            logits = self.base_model.lm_head(hidden_states)
 
         loss = self._compute_loss(logits, labels)
 
@@ -390,9 +411,12 @@ class TransformerWithARB(nn.Module):
                 )
                 arb_extractions[i] = (d_a, d_b)
 
-        # Final RMSNorm + LM head
+        # Final RMSNorm + LM head (with optional LoRA)
         hidden_states = inner_model.norm(hidden_states)
-        logits = self.base_model.lm_head(hidden_states)
+        if self.lora_head is not None:
+            logits = self.lora_head(hidden_states)
+        else:
+            logits = self.base_model.lm_head(hidden_states)
 
         loss = self._compute_loss(logits, labels)
 
@@ -485,6 +509,10 @@ class TransformerWithARB(nn.Module):
     ) -> Tensor:
         """Autoregressive text generation with KV caching.
 
+        Uses ARB generation cache mode so that arithmetic results computed
+        from the full prompt are reused on subsequent steps (fixing the bug
+        where step 2+ only sees the last token and can't find the operator).
+
         Args:
             input_ids: [batch, seq_len] prompt token IDs
             max_new_tokens: Maximum tokens to generate
@@ -499,56 +527,67 @@ class TransformerWithARB(nn.Module):
         generated = input_ids
         cache = DynamicCache()
 
-        for _ in range(max_new_tokens):
-            cache_len = cache.get_seq_length() if cache else 0
-            if cache_len == 0:
-                cur_input = generated
-            else:
-                cur_input = generated[:, -1:]
+        # Enter generation cache mode for all ARBs
+        for arb in self.arbs.values():
+            arb.enter_generation_mode()
 
-            # Build attention mask for the full sequence so far
-            # (needed for proper causal masking with KV cache)
-            full_len = generated.shape[1]
-            attn_mask = torch.ones(
-                generated.shape[0], full_len,
-                dtype=torch.long, device=generated.device,
-            )
+        try:
+            for _ in range(max_new_tokens):
+                cache_len = cache.get_seq_length() if cache else 0
+                if cache_len == 0:
+                    cur_input = generated
+                else:
+                    cur_input = generated[:, -1:]
 
-            outputs = self.forward(
-                cur_input,
-                attention_mask=attn_mask,
-                past_key_values=cache,
-                use_cache=True,
-            )
-            cache = outputs["past_key_values"]
-            next_token_logits = outputs["logits"][:, -1, :]  # [batch, vocab]
+                # Build attention mask for the full sequence so far
+                # (needed for proper causal masking with KV cache)
+                full_len = generated.shape[1]
+                attn_mask = torch.ones(
+                    generated.shape[0], full_len,
+                    dtype=torch.long, device=generated.device,
+                )
 
-            if greedy:
-                next_token = next_token_logits.argmax(dim=-1, keepdim=True)
-            else:
-                logits_scaled = next_token_logits / temperature
-                if top_k is not None:
-                    top_k_vals, _ = logits_scaled.topk(top_k, dim=-1)
-                    threshold = top_k_vals[:, -1:]
-                    logits_scaled = logits_scaled.masked_fill(
-                        logits_scaled < threshold, float("-inf")
-                    )
-                probs = F.softmax(logits_scaled, dim=-1)
-                next_token = torch.multinomial(probs, num_samples=1)
+                outputs = self.forward(
+                    cur_input,
+                    attention_mask=attn_mask,
+                    past_key_values=cache,
+                    use_cache=True,
+                )
+                cache = outputs["past_key_values"]
+                next_token_logits = outputs["logits"][:, -1, :]  # [batch, vocab]
 
-            generated = torch.cat([generated, next_token], dim=1)
+                if greedy:
+                    next_token = next_token_logits.argmax(dim=-1, keepdim=True)
+                else:
+                    logits_scaled = next_token_logits / temperature
+                    if top_k is not None:
+                        top_k_vals, _ = logits_scaled.topk(top_k, dim=-1)
+                        threshold = top_k_vals[:, -1:]
+                        logits_scaled = logits_scaled.masked_fill(
+                            logits_scaled < threshold, float("-inf")
+                        )
+                    probs = F.softmax(logits_scaled, dim=-1)
+                    next_token = torch.multinomial(probs, num_samples=1)
 
-            # Stop at EOS token
-            if (next_token == self.base_model.config.eos_token_id).all():
-                break
+                generated = torch.cat([generated, next_token], dim=1)
+
+                # Stop at EOS token
+                if (next_token == self.base_model.config.eos_token_id).all():
+                    break
+        finally:
+            # Always exit generation mode to clean up cached state
+            for arb in self.arbs.values():
+                arb.exit_generation_mode()
 
         return generated
 
     def get_trainable_parameters(self) -> list[nn.Parameter]:
-        """Return only the ARB learned parameters for optimization."""
+        """Return only the ARB learned parameters (and LoRA if active) for optimization."""
         params = []
         for arb in self.arbs.values():
             params.extend(p for p in arb.parameters() if p.requires_grad)
+        if self.lora_head is not None:
+            params.extend(p for p in self.lora_head.parameters() if p.requires_grad)
         return params
 
     def save_exported_model(

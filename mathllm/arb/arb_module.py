@@ -49,19 +49,37 @@ class ArithmeticResidualBlock(nn.Module):
         use_attention: bool = False,
         attn_rank: int = 32,
         eq_token_id: int = _DEFAULT_EQ_TOKEN_ID,
+        injection_pos_dim: int = 0,
+        injection_mlp_hidden: int = 0,
     ):
         super().__init__()
+
+        # Generation cache state (used to fix KV cache bug)
+        self._generation_mode = False
+        self._cached_results: Tensor | None = None
+        self._generation_offset = 0
         self.hidden_dim = hidden_dim
         self.num_digits = num_digits
         self.num_results = num_results
         self.eq_token_id = eq_token_id
+        self.injection_pos_dim = injection_pos_dim
 
         # Injection receives decoded digit vectors, not raw circle encodings.
         # 5 operations: add (unsigned), sub (signed → digits + sign),
         # mul (unsigned), exp (unsigned), div (unsigned)
         # Sub has K+1 dims (K digits + sign bit), others have K dims each.
         # Total: 4*K + (K+1) = 5K + 1
-        total_result_dim = num_results * num_digits + 1  # +1 for sub sign bit
+        digit_result_dim = num_results * num_digits + 1  # +1 for sub sign bit
+
+        # Position-aware injection: add learned answer-position embeddings
+        # so each answer position gets a unique injection signal.
+        _MAX_ANSWER_TOKENS = 16  # enough for any answer length
+        if injection_pos_dim > 0:
+            self.answer_pos_embed = nn.Embedding(_MAX_ANSWER_TOKENS, injection_pos_dim)
+            total_result_dim = digit_result_dim + injection_pos_dim
+        else:
+            self.answer_pos_embed = None
+            total_result_dim = digit_result_dim
 
         # Stage 1: Learned extraction
         self.extract = OperandExtractor(
@@ -91,6 +109,7 @@ class ArithmeticResidualBlock(nn.Module):
             dropout=dropout,
             init_std=injector_init_std,
             gate_init_logit=gate_init_logit,
+            mlp_hidden=injection_mlp_hidden,
         )
 
         # Freeze stages 2 and 3
@@ -98,6 +117,59 @@ class ArithmeticResidualBlock(nn.Module):
             param.requires_grad = False
         for param in self.compute.parameters():
             param.requires_grad = False
+
+    # ------------------------------------------------------------------
+    # Generation cache mode
+    # ------------------------------------------------------------------
+
+    def enter_generation_mode(self) -> None:
+        """Enable generation cache mode.
+
+        On the first forward pass, arithmetic results are cached.
+        Subsequent passes reuse the cached results with updated
+        position offsets, fixing the KV cache bug where step 2+
+        receives only the last token and can't find the operator.
+        """
+        self._generation_mode = True
+        self._cached_results = None
+        self._generation_offset = 0
+
+    def exit_generation_mode(self) -> None:
+        """Disable generation cache mode and clear cached state."""
+        self._generation_mode = False
+        self._cached_results = None
+        self._generation_offset = 0
+
+    def _forward_generation_cached(self, h: Tensor) -> tuple[Tensor, Tensor, Tensor]:
+        """Forward pass during generation using cached arithmetic results.
+
+        Called on step 2+ when only the last generated token is passed.
+        Uses cached digit results from the prompt pass with a fresh
+        position embedding for the current answer offset.
+        """
+        B = h.shape[0]
+        K = self.num_digits
+        device = h.device
+
+        # Expand cached results to [B, 1, D]
+        results = self._cached_results.unsqueeze(1)
+
+        # Add position embedding for current answer offset
+        if self.answer_pos_embed is not None:
+            offset = min(self._generation_offset, 15)
+            offset_tensor = torch.full((B, 1), offset, dtype=torch.long, device=device)
+            pos_emb = self.answer_pos_embed(offset_tensor)  # [B, 1, pos_dim]
+            results = torch.cat([results, pos_emb], dim=-1)
+
+        self._generation_offset += 1
+
+        # Inject into hidden state
+        h_prime = self.inject(results, h)
+
+        # Dummy extractions (not used during generation)
+        d_a = torch.zeros(B, 1, K, device=device)
+        d_b = torch.zeros(B, 1, K, device=device)
+        return h_prime, d_a, d_b
 
     def _decode_to_digits(
         self,
@@ -165,6 +237,10 @@ class ArithmeticResidualBlock(nn.Module):
             d_a: [batch, seq_len, num_digits] — extracted digit vector for operand A
             d_b: [batch, seq_len, num_digits] — extracted digit vector for operand B
         """
+        # Generation cache: reuse cached results on step 2+
+        if self._generation_mode and self._cached_results is not None:
+            return self._forward_generation_cached(h)
+
         # Stage 1: Deterministic extraction via token lookup
         d_a, d_b, _, _ = self.extract(h, input_ids, attention_mask)
 
@@ -188,10 +264,29 @@ class ArithmeticResidualBlock(nn.Module):
         )  # [B]
         positions = torch.arange(S, device=input_ids.device).unsqueeze(0)  # [1, S]
         inject_mask = (positions >= eq_pos.unsqueeze(1)).float()  # [B, S]
-        inject_mask = inject_mask.unsqueeze(2)  # [B, S, 1] for broadcasting
+
+        # Apply mask to results
+        masked_results = results * inject_mask.unsqueeze(2)  # [B, S, D]
+
+        # Add position-aware answer offset embeddings if enabled
+        if self.answer_pos_embed is not None:
+            offset = (positions - eq_pos.unsqueeze(1)).clamp(0, 15)  # [B, S]
+            offset = (offset * inject_mask).long()  # zero out non-answer positions
+            pos_emb = self.answer_pos_embed(offset)  # [B, S, pos_dim]
+            pos_emb = pos_emb * inject_mask.unsqueeze(2)
+            masked_results = torch.cat([masked_results, pos_emb], dim=-1)
 
         # Stage 4: Inject decoded digits into hidden state
-        h_prime = self.inject(results * inject_mask, h)
+        h_prime = self.inject(masked_results, h)
+
+        # Cache results for generation mode (step 2+ will reuse)
+        if self._generation_mode and self._cached_results is None:
+            # Cache the unmasked digit results (position-independent, same at all positions)
+            # Take the first position's results since they're broadcast-identical
+            self._cached_results = results[:, 0, :].clone()
+            # Next generation step will be at offset 1 from '='
+            self._generation_offset = 1
+
         return h_prime, d_a, d_b
 
     def count_parameters(self) -> dict[str, int]:

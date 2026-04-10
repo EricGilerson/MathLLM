@@ -17,3 +17,5 @@ wandb/
 CLAUDE.md
 /.idea
 /trained_model
+/trained_model_poc
+/data_poc

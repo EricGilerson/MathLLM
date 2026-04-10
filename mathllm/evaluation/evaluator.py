@@ -18,6 +18,7 @@ import re
 from collections import defaultdict
 
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from tqdm import tqdm
@@ -405,10 +406,90 @@ class ARBEvaluator:
         logger.info(f"  multi_step_2: {accuracy:.1%} ({correct}/{total})")
         return {"multi_step_2_accuracy": accuracy}
 
-    def ablation_test(self, num_samples: int = 50, seed: int = 99) -> dict[str, float]:
-        """Zero out W_proj, confirm accuracy reverts to baseline.
+    def _zero_injection(self) -> dict:
+        """Zero all injection projection weights/biases and return saved state."""
+        saved = {}
+        for key, arb in self.model.arbs.items():
+            proj = arb.inject.projection
+            if isinstance(proj, nn.Sequential):
+                # MLP injection: save and zero all layers
+                layer_states = []
+                for layer in proj:
+                    if hasattr(layer, "weight"):
+                        layer_states.append({
+                            "weight": layer.weight.data.clone(),
+                            "bias": layer.bias.data.clone(),
+                        })
+                        layer.weight.data.zero_()
+                        layer.bias.data.zero_()
+                saved[key] = {"type": "sequential", "layers": layer_states}
+            else:
+                saved[key] = {
+                    "type": "linear",
+                    "weight": proj.weight.data.clone(),
+                    "bias": proj.bias.data.clone(),
+                }
+                proj.weight.data.zero_()
+                proj.bias.data.zero_()
+        return saved
 
-        Saves W_proj weights, zeros them, runs accuracy test, then restores.
+    def _restore_injection(self, saved: dict) -> None:
+        """Restore injection projection weights from saved state."""
+        for key, arb in self.model.arbs.items():
+            state = saved[key]
+            proj = arb.inject.projection
+            if state["type"] == "sequential":
+                idx = 0
+                for layer in proj:
+                    if hasattr(layer, "weight"):
+                        layer.weight.data.copy_(state["layers"][idx]["weight"])
+                        layer.bias.data.copy_(state["layers"][idx]["bias"])
+                        idx += 1
+            else:
+                proj.weight.data.copy_(state["weight"])
+                proj.bias.data.copy_(state["bias"])
+
+    def _zero_lora(self) -> dict | None:
+        """Zero LoRA A matrix (disabling LoRA) and return saved state."""
+        if not hasattr(self.model, "lora_head") or self.model.lora_head is None:
+            return None
+        saved = {
+            "lora_A": self.model.lora_head.lora_A.data.clone(),
+            "lora_B": self.model.lora_head.lora_B.data.clone(),
+        }
+        self.model.lora_head.lora_A.data.zero_()
+        self.model.lora_head.lora_B.data.zero_()
+        return saved
+
+    def _restore_lora(self, saved: dict | None) -> None:
+        """Restore LoRA weights from saved state."""
+        if saved is None or self.model.lora_head is None:
+            return
+        self.model.lora_head.lora_A.data.copy_(saved["lora_A"])
+        self.model.lora_head.lora_B.data.copy_(saved["lora_B"])
+
+    def _run_accuracy_test(
+        self, num_samples: int, rng, pure_arithmetic: bool = False
+    ) -> int:
+        """Run a quick accuracy test on 2-digit addition, return correct count."""
+        correct = 0
+        for _ in range(num_samples):
+            a, b = _sample_operands(2, rng)
+            if pure_arithmetic:
+                prompt = f"{a}+{b}="
+            else:
+                prompt = f"{a} + {b} ="
+            expected = a + b
+            generated = self._generate_text(prompt, max_new_tokens=10)
+            extracted = self._extract_number_from_generation(generated)
+            if extracted is not None and int(extracted) == expected:
+                correct += 1
+        return correct
+
+    def ablation_test(self, num_samples: int = 50, seed: int = 99) -> dict[str, float]:
+        """Zero out injection, confirm accuracy reverts to baseline.
+
+        Handles both linear and MLP injection projections.
 
         Returns:
             Dict with 'ablated' and 'normal' accuracy for comparison.
@@ -419,49 +500,75 @@ class ARBEvaluator:
         self.model.eval()
         self.model.to(self.device)
 
-        # Normal accuracy (quick test on 2-digit addition)
-        normal_correct = 0
-        for _ in range(num_samples):
-            a, b = _sample_operands(2, rng)
-            prompt = f"{a} + {b} ="
-            expected = a + b
-            generated = self._generate_text(prompt, max_new_tokens=10)
-            extracted = self._extract_number_from_generation(generated)
-            if extracted is not None and int(extracted) == expected:
-                normal_correct += 1
+        normal_correct = self._run_accuracy_test(num_samples, rng)
 
-        # Save and zero W_proj
-        saved_states = {}
-        for key, arb in self.model.arbs.items():
-            saved_states[key] = {
-                "weight": arb.inject.projection.weight.data.clone(),
-                "bias": arb.inject.projection.bias.data.clone(),
-            }
-            arb.inject.projection.weight.data.zero_()
-            arb.inject.projection.bias.data.zero_()
-
-        # Ablated accuracy
-        rng = random.Random(seed)  # Reset for same examples
-        ablated_correct = 0
-        for _ in range(num_samples):
-            a, b = _sample_operands(2, rng)
-            prompt = f"{a} + {b} ="
-            expected = a + b
-            generated = self._generate_text(prompt, max_new_tokens=10)
-            extracted = self._extract_number_from_generation(generated)
-            if extracted is not None and int(extracted) == expected:
-                ablated_correct += 1
-
-        # Restore W_proj
-        for key, arb in self.model.arbs.items():
-            arb.inject.projection.weight.data.copy_(saved_states[key]["weight"])
-            arb.inject.projection.bias.data.copy_(saved_states[key]["bias"])
+        saved = self._zero_injection()
+        rng = random.Random(seed)
+        ablated_correct = self._run_accuracy_test(num_samples, rng)
+        self._restore_injection(saved)
 
         normal_acc = normal_correct / num_samples
         ablated_acc = ablated_correct / num_samples
         logger.info(f"Ablation: normal={normal_acc:.1%}, ablated={ablated_acc:.1%}")
-
         return {"normal_accuracy": normal_acc, "ablated_accuracy": ablated_acc}
+
+    def four_way_ablation(
+        self,
+        num_samples: int = 50,
+        seed: int = 99,
+        pure_arithmetic: bool = False,
+    ) -> dict[str, float]:
+        """Four-way ablation proving the ARB is the source of improvement.
+
+        Conditions:
+        1. Full (ARB + LoRA): expected ~100% accuracy
+        2. LoRA only (ARB zeroed): LoRA can't do arithmetic alone
+        3. ARB only (LoRA zeroed): some improvement from injection
+        4. Baseline (both zeroed): base model accuracy
+
+        Returns:
+            Dict mapping condition names to accuracy.
+        """
+        import random
+
+        self.model.eval()
+        self.model.to(self.device)
+
+        results = {}
+
+        # 1. Full model (ARB + LoRA)
+        rng = random.Random(seed)
+        full_correct = self._run_accuracy_test(num_samples, rng, pure_arithmetic)
+        results["full"] = full_correct / num_samples
+        logger.info(f"  Full (ARB+LoRA): {results['full']:.1%}")
+
+        # 2. LoRA only (zero ARB injection)
+        saved_arb = self._zero_injection()
+        rng = random.Random(seed)
+        lora_only_correct = self._run_accuracy_test(num_samples, rng, pure_arithmetic)
+        results["lora_only"] = lora_only_correct / num_samples
+        logger.info(f"  LoRA only: {results['lora_only']:.1%}")
+        self._restore_injection(saved_arb)
+
+        # 3. ARB only (zero LoRA)
+        saved_lora = self._zero_lora()
+        rng = random.Random(seed)
+        arb_only_correct = self._run_accuracy_test(num_samples, rng, pure_arithmetic)
+        results["arb_only"] = arb_only_correct / num_samples
+        logger.info(f"  ARB only: {results['arb_only']:.1%}")
+        self._restore_lora(saved_lora)
+
+        # 4. Baseline (zero both)
+        saved_arb = self._zero_injection()
+        saved_lora = self._zero_lora()
+        rng = random.Random(seed)
+        baseline_correct = self._run_accuracy_test(num_samples, rng, pure_arithmetic)
+        results["baseline"] = baseline_correct / num_samples
+        logger.info(f"  Baseline: {results['baseline']:.1%}")
+        self._restore_lora(saved_lora)
+        self._restore_injection(saved_arb)
+
+        return results
 
     @torch.no_grad()
     def perplexity_test(self, eval_texts: list[str], max_samples: int = 200) -> dict[str, float]:
@@ -538,6 +645,10 @@ class ARBEvaluator:
 
         logger.info("=== Ablation Test ===")
         results["ablation"] = self.ablation_test()
+
+        if hasattr(self.model, "lora_head") and self.model.lora_head is not None:
+            logger.info("=== Four-Way Ablation ===")
+            results["four_way_ablation"] = self.four_way_ablation()
 
         if eval_texts:
             logger.info("=== Perplexity Test ===")

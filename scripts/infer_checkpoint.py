@@ -75,23 +75,28 @@ def digits_to_int(digits: list[int]) -> int:
 
 
 def decode_digit_logits(logits: torch.Tensor) -> list[int]:
-    """Decode per-digit logits into class indices."""
+    """Decode digit values — either soft floats (round) or classification logits (argmax)."""
+    if logits.dim() == 1:
+        # Soft digit vector [K] — round to nearest integer
+        return logits.round().clamp(0, 9).long().tolist()
+    # Classification logits [K, C] — argmax
     return logits.argmax(dim=-1).tolist()
 
 
 def collect_layer_extractions(
     arb_extractions: dict[int, tuple[torch.Tensor, torch.Tensor]],
-    token_index: int,
+    token_index_a: int,
+    token_index_b: int,
 ) -> list[LayerExtraction]:
-    """Decode layer extractions for a single-item batch at one token position."""
+    """Decode layer extractions for a single-item batch at per-head positions."""
     layers: list[LayerExtraction] = []
     for layer_id, (logits_a, logits_b) in sorted(arb_extractions.items()):
-        digits_a = decode_digit_logits(logits_a[0, token_index])
-        digits_b = decode_digit_logits(logits_b[0, token_index])
+        digits_a = decode_digit_logits(logits_a[0, token_index_a])
+        digits_b = decode_digit_logits(logits_b[0, token_index_b])
         layers.append(
             LayerExtraction(
                 layer_id=layer_id,
-                token_index=token_index,
+                token_index=token_index_b,
                 digits_a=digits_a,
                 digits_b=digits_b,
                 value_a=digits_to_int(digits_a),
@@ -101,17 +106,19 @@ def collect_layer_extractions(
     return layers
 
 
-def format_extractions(extractions: list[LayerExtraction]) -> str:
+def format_extractions(extractions: list[LayerExtraction], op_index: int | None = None, eq_index: int | None = None) -> str:
     """Render decoded extraction details for printing."""
     if not extractions:
         return "extractions: <none>"
 
     lines = ["extractions:"]
     for extraction in extractions:
+        a_pos = f"op@{op_index}" if op_index is not None else f"@{extraction.token_index}"
+        b_pos = f"eq@{eq_index}" if eq_index is not None else f"@{extraction.token_index}"
         lines.append(
-            f"  layer {extraction.layer_id} @ token {extraction.token_index}: "
-            f"a_digits={extraction.digits_a} a_value={extraction.value_a} "
-            f"b_digits={extraction.digits_b} b_value={extraction.value_b}"
+            f"  layer {extraction.layer_id}: "
+            f"a({a_pos})={extraction.digits_a} val={extraction.value_a}  "
+            f"b({b_pos})={extraction.digits_b} val={extraction.value_b}"
         )
     return "\n".join(lines)
 
@@ -150,13 +157,28 @@ def load_checkpointed_model(
         tokenizer.pad_token = tokenizer.eos_token
 
     model = GPT2WithARB(config)
+    model.build_token_digit_tables(tokenizer)
     ckpt = torch.load(resolved_checkpoint, map_location=device, weights_only=False)
     for key, state in ckpt["arb_state"].items():
-        model.arbs[key].load_state_dict(state)
+        model.arbs[key].load_state_dict(state, strict=False)
 
     model.to(device)
     model.eval()
     return model, tokenizer, config, resolved_checkpoint
+
+
+def find_operator_token(tokenizer, prompt: str) -> int | None:
+    """Find the token index of the arithmetic operator in the prompt."""
+    match = _PROMPT_PATTERN.match(prompt)
+    if not match:
+        return None
+    # Tokenize the prefix up to and including the operator
+    op_start = match.start(2)
+    op_end = match.end(2)
+    prefix = prompt[:op_end]
+    prefix_ids = tokenizer.encode(prefix)
+    # The operator token is the last token of the prefix
+    return len(prefix_ids) - 1
 
 
 def analyze_prompt(
@@ -164,7 +186,7 @@ def analyze_prompt(
     tokenizer,
     device: torch.device,
     prompt: str,
-) -> list[LayerExtraction]:
+) -> tuple[list[LayerExtraction], int, int]:
     """Run a forward pass on the prompt and decode extraction outputs."""
     input_ids = tokenizer.encode(prompt, return_tensors="pt").to(device)
     attention_mask = torch.ones_like(input_ids)
@@ -172,8 +194,12 @@ def analyze_prompt(
     with torch.no_grad():
         outputs = model(input_ids=input_ids, attention_mask=attention_mask)
 
-    token_index = int(attention_mask[0].sum().item()) - 1
-    return collect_layer_extractions(outputs.get("arb_extractions", {}), token_index)
+    eq_index = int(attention_mask[0].sum().item()) - 1
+    op_index = find_operator_token(tokenizer, prompt)
+    extractions = collect_layer_extractions(
+        outputs.get("arb_extractions", {}), eq_index, eq_index
+    )
+    return extractions, op_index, eq_index
 
 
 def generate_text(
@@ -204,13 +230,15 @@ def print_result(
     extractions: list[LayerExtraction],
     completion: str,
     full_text: str,
+    op_index: int | None = None,
+    eq_index: int | None = None,
 ) -> None:
     """Print extraction details alongside the usual inference output."""
     expected = compute_expected(prompt)
 
     print(f"checkpoint: {checkpoint_path}")
     print(f"prompt:     {prompt}")
-    print(format_extractions(extractions))
+    print(format_extractions(extractions, op_index, eq_index))
     print(f"completion: {completion.strip() or '<empty>'}")
     print(f"full_text:  {full_text}")
     if expected is not None:
@@ -241,7 +269,7 @@ def interactive_loop(
         if not prompt:
             break
 
-        extractions = analyze_prompt(model, tokenizer, device, prompt)
+        extractions, op_idx, eq_idx = analyze_prompt(model, tokenizer, device, prompt)
         full_text, completion = generate_text(
             model=model,
             tokenizer=tokenizer,
@@ -249,7 +277,7 @@ def interactive_loop(
             prompt=prompt,
             max_new_tokens=max_new_tokens,
         )
-        print_result(checkpoint_path, prompt, extractions, completion, full_text)
+        print_result(checkpoint_path, prompt, extractions, completion, full_text, op_idx, eq_idx)
 
 
 def main() -> None:
@@ -298,7 +326,7 @@ def main() -> None:
     logger.info("Loaded checkpoint from: %s", checkpoint_path)
 
     if args.prompt is not None:
-        extractions = analyze_prompt(model, tokenizer, device, args.prompt)
+        extractions, op_idx, eq_idx = analyze_prompt(model, tokenizer, device, args.prompt)
         full_text, completion = generate_text(
             model=model,
             tokenizer=tokenizer,
@@ -306,7 +334,7 @@ def main() -> None:
             prompt=args.prompt,
             max_new_tokens=args.max_new_tokens,
         )
-        print_result(checkpoint_path, args.prompt, extractions, completion, full_text)
+        print_result(checkpoint_path, args.prompt, extractions, completion, full_text, op_idx, eq_idx)
         return
 
     interactive_loop(

@@ -112,6 +112,7 @@ def main():
     # Build model
     logger.info(f"Loading base model: {config.training.base_model}")
     model = GPT2WithARB(config)
+    model.build_token_digit_tables(tokenizer)
     params = count_parameters(model)
     logger.info(f"Parameters — trainable: {params['trainable']:,}, frozen: {params['frozen']:,}")
 

@@ -70,6 +70,7 @@ class TrainingConfig:
     aux_loss_weight: float = 1.0  # lambda for auxiliary extraction loss
     aux_loss_decay: float = 0.1  # multiplier for aux weight in phase 3
     phase1_aux_only: bool = True  # filter to aux-eligible examples in Phase 1
+    phase1_aux_threshold: float = 0.05  # stay in phase 1 until aux_eval < this
     curriculum_schedule: tuple[tuple[float, int], ...] = ((0.0, 3), (0.4, 6), (0.7, 10))
 
 

@@ -21,6 +21,10 @@ from transformers import GPT2Config, GPT2LMHeadModel, GPT2Tokenizer
 from transformers.cache_utils import DynamicCache
 from transformers.models.gpt2.modeling_gpt2 import GPT2Block
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 from mathllm.arb.arb_module import ArithmeticResidualBlock
 from mathllm.config import Config, load_config, save_config
 from mathllm.model.utils import freeze_parameters
@@ -81,6 +85,15 @@ class GPT2WithARB(nn.Module):
                 use_attention=config.arb.extraction_use_attention,
                 attn_rank=config.arb.extraction_attn_rank,
             )
+
+    def build_token_digit_tables(self, tokenizer) -> None:
+        """Build frozen digit lookup tables in all ARB extractors."""
+        for key, arb in self.arbs.items():
+            arb.extract.build_token_digits_table(tokenizer)
+        logger.info(
+            "Built token digit tables for %d ARBs (vocab_size=%d)",
+            len(self.arbs), tokenizer.vocab_size,
+        )
 
     def forward(
         self,
@@ -163,10 +176,10 @@ class GPT2WithARB(nn.Module):
 
             # Insert ARB after this layer if configured
             if i in self.arb_positions:
-                hidden_states, d_a, d_b, logits_a, logits_b = self.arbs[str(i)](
-                    hidden_states, attention_mask
+                hidden_states, d_a, d_b, soft_a, soft_b = self.arbs[str(i)](
+                    hidden_states, input_ids, attention_mask
                 )
-                arb_extractions[i] = (logits_a, logits_b)  # classification logits for aux loss
+                arb_extractions[i] = (soft_a, soft_b)  # soft digit values for aux loss
 
         # Final layer norm
         hidden_states = transformer.ln_f(hidden_states)

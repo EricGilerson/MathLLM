@@ -91,14 +91,17 @@ class ArithmeticResidualBlock(nn.Module):
             param.requires_grad = False
 
     def forward(
-        self, h: Tensor, attention_mask: Tensor | None = None,
+        self,
+        h: Tensor,
+        input_ids: Tensor,
+        attention_mask: Tensor | None = None,
     ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
         """Run the full ARB on the hidden state.
 
         Args:
             h: [batch, seq_len, hidden_dim]
+            input_ids: [batch, seq_len] token IDs for digit lookup
             attention_mask: [batch, seq_len] (1 = real, 0 = padding).
-                Passed to extraction attention when enabled.
 
         Returns:
             h': [batch, seq_len, hidden_dim] — h + delta_h from arithmetic
@@ -107,8 +110,8 @@ class ArithmeticResidualBlock(nn.Module):
             d_a_cont: [batch, seq_len, num_digits] — continuous (pre-round) operand A
             d_b_cont: [batch, seq_len, num_digits] — continuous (pre-round) operand B
         """
-        # Stage 1: Extract operand digit vectors
-        d_a, d_b, d_a_cont, d_b_cont = self.extract(h, attention_mask)
+        # Stage 1: Extract operand digit vectors via token lookup + attention
+        d_a, d_b, d_a_cont, d_b_cont = self.extract(h, input_ids, attention_mask)
 
         # Stage 2: Encode to RNS circles (uses rounded values)
         a_circle = self.encode(d_a)          # [B, S, m, 2]

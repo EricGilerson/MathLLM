@@ -1,13 +1,16 @@
-"""Stage 1: Learned Operand Extraction.
+"""Stage 1: Learned Operand Extraction via Token Lookup + Attention.
 
-Two MLP heads read digit-level features from the hidden state, outputting
-per-digit classification logits. The discrete digits for downstream stages
-are obtained via argmax with a straight-through estimator for gradient flow.
+Instead of decoding numbers from hidden states via MLP classification, this
+module uses a deterministic approach:
 
-When attention is enabled, each operand head first applies a low-rank causal
-cross-attention over the sequence. This lets the extraction attend to the
-actual operand token positions rather than compressing everything into the
-hidden state at one position.
+1. A frozen lookup table maps every token ID to its digit vector (e.g., token
+   "300" → [0, 0, 3, 0, 0, 0]). Non-number tokens map to zeros.
+2. Learned causal attention (separate Q/K per operand) selects which token
+   positions contain operand A vs operand B.
+3. The extraction output is: attention_weights @ digit_lookup[input_ids].
+
+This reduces the learning problem from "decode 768-dim hidden states into
+digit classifications" to "put attention weight on the correct token."
 """
 
 from __future__ import annotations
@@ -17,19 +20,15 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
 
-from mathllm.arb.ste import ste_argmax
+from mathllm.arb.ste import ste_round_clamp
 
 
 class OperandExtractor(nn.Module):
-    """Extract two operand digit vectors from the transformer hidden state.
+    """Extract two operand digit vectors using token lookup + learned attention.
 
     Each operand is represented as K digits in base 10, least-significant first.
-    Each digit is predicted as a 10-class classification problem via a small MLP.
-    Dropout on the input prevents overfitting to specific hidden-state patterns.
-
-    When use_attention=True, a lightweight causal attention layer lets each
-    operand head attend across the full sequence to locate operand tokens,
-    rather than relying solely on the hidden state at a single position.
+    A frozen lookup table provides exact digit vectors for number tokens.
+    Learned attention selects which positions to read from.
     """
 
     def __init__(
@@ -48,37 +47,54 @@ class OperandExtractor(nn.Module):
         self.use_attention = use_attention
         self.dropout = nn.Dropout(dropout)
 
-        if use_attention:
-            self.attn_rank = attn_rank
-            self.scale = attn_rank ** -0.5
-            self.q_proj_a = nn.Linear(hidden_dim, attn_rank, bias=False)
-            self.k_proj_a = nn.Linear(hidden_dim, attn_rank, bias=False)
-            self.q_proj_b = nn.Linear(hidden_dim, attn_rank, bias=False)
-            self.k_proj_b = nn.Linear(hidden_dim, attn_rank, bias=False)
+        self.attn_rank = attn_rank
+        self.scale = attn_rank ** -0.5
+        self.q_proj_a = nn.Linear(hidden_dim, attn_rank, bias=False)
+        self.k_proj_a = nn.Linear(hidden_dim, attn_rank, bias=False)
+        self.q_proj_b = nn.Linear(hidden_dim, attn_rank, bias=False)
+        self.k_proj_b = nn.Linear(hidden_dim, attn_rank, bias=False)
 
-        self.head_a = nn.Sequential(
-            nn.Linear(hidden_dim, mlp_hidden),
-            nn.GELU(),
-            nn.Linear(mlp_hidden, num_digits * num_classes),
+        # Token lookup table will be registered by build_token_digits_table()
+        # Initialized as empty — must call build_token_digits_table before use
+        self.register_buffer(
+            "token_digits", torch.zeros(1, num_digits), persistent=True
         )
-        self.head_b = nn.Sequential(
-            nn.Linear(hidden_dim, mlp_hidden),
-            nn.GELU(),
-            nn.Linear(mlp_hidden, num_digits * num_classes),
-        )
+        self._table_built = False
 
-    def _causal_attn(
+    def build_token_digits_table(self, tokenizer) -> None:
+        """Build frozen lookup: token_id -> digit vector [V, K].
+
+        Must be called once after construction with the model's tokenizer.
+        Non-number tokens get all-zero digit vectors.
+        """
+        vocab_size = tokenizer.vocab_size
+        table = torch.zeros(vocab_size, self.num_digits)
+
+        for token_id in range(vocab_size):
+            text = tokenizer.decode([token_id]).strip()
+            if text.isascii() and text.isdigit():
+                value = int(text)
+                for d in range(self.num_digits):
+                    table[token_id, d] = value % 10
+                    value //= 10
+
+        self.token_digits = table.to(self.token_digits.device)
+        self._table_built = True
+
+    def _compute_attn_weights(
         self,
         q_proj: nn.Linear,
         k_proj: nn.Linear,
         h: Tensor,
         attention_mask: Tensor | None = None,
     ) -> Tensor:
-        """Low-rank causal attention in float32 for numerical stability."""
-        orig_dtype = h.dtype
+        """Compute causal attention weights in float32 for stability.
+
+        Returns:
+            attn_weights: [B, S, S] attention probabilities
+        """
         device_type = h.device.type if h.device.type in ("cuda", "mps") else "cpu"
 
-        # Disable autocast so all ops run in float32
         with torch.amp.autocast(device_type=device_type, enabled=False):
             h_f32 = h.float()
             B, S, _ = h_f32.shape
@@ -87,54 +103,59 @@ class OperandExtractor(nn.Module):
             K = F.linear(h_f32, k_proj.weight.float())  # [B, S, rank]
             attn = (Q @ K.transpose(-1, -2)) * self.scale  # [B, S, S]
 
-            # Causal mask: prevent attending to future positions
+            # Causal mask
             causal = torch.triu(
                 torch.ones(S, S, device=h.device, dtype=torch.bool), diagonal=1
             )
             attn = attn.masked_fill(causal, -1e9)
 
-            # Padding mask: prevent attending to padding tokens
+            # Padding mask
             if attention_mask is not None:
                 pad_mask = (attention_mask == 0).unsqueeze(1)  # [B, 1, S]
                 attn = attn.masked_fill(pad_mask, -1e9)
 
-            attn = F.softmax(attn, dim=-1)
-            out = attn @ h_f32  # [B, S, hidden_dim]
+            attn = F.softmax(attn, dim=-1)  # [B, S, S]
 
-        return out.to(orig_dtype)
+        return attn
 
     def forward(
-        self, h: Tensor, attention_mask: Tensor | None = None,
+        self,
+        h: Tensor,
+        input_ids: Tensor,
+        attention_mask: Tensor | None = None,
     ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
-        """Extract two operand digit vectors from hidden state.
+        """Extract two operand digit vectors via attention over token digits.
 
         Args:
             h: Hidden state [batch, seq_len, hidden_dim]
-            attention_mask: [batch, seq_len] (1 = real token, 0 = padding).
-                Only used when use_attention=True.
+            input_ids: [batch, seq_len] token IDs
+            attention_mask: [batch, seq_len] (1 = real token, 0 = padding)
 
         Returns:
-            d_a: Digit vector for operand A [batch, seq_len, K], integers in [0, 9]
-            d_b: Digit vector for operand B [batch, seq_len, K], integers in [0, 9]
-            logits_a: Classification logits for operand A [batch, seq_len, K, C]
-            logits_b: Classification logits for operand B [batch, seq_len, K, C]
+            d_a: Rounded digit vector for operand A [batch, seq_len, K]
+            d_b: Rounded digit vector for operand B [batch, seq_len, K]
+            soft_a: Continuous (pre-round) digits for A [batch, seq_len, K]
+            soft_b: Continuous (pre-round) digits for B [batch, seq_len, K]
         """
-        B, S, _ = h.shape
+        # Look up digit vectors for each token: [B, S, K]
+        # Clamp to valid range in case of out-of-vocab tokens
+        ids_clamped = input_ids.clamp(0, self.token_digits.size(0) - 1)
+        digit_vectors = self.token_digits[ids_clamped]  # [B, S, K]
 
-        if self.use_attention:
-            h_a = self._causal_attn(self.q_proj_a, self.k_proj_a, h, attention_mask)
-            h_b = self._causal_attn(self.q_proj_b, self.k_proj_b, h, attention_mask)
-        else:
-            h_a = h
-            h_b = h
+        # Compute attention weights for each operand head
+        attn_a = self._compute_attn_weights(
+            self.q_proj_a, self.k_proj_a, h, attention_mask
+        )  # [B, S, S]
+        attn_b = self._compute_attn_weights(
+            self.q_proj_b, self.k_proj_b, h, attention_mask
+        )  # [B, S, S]
 
-        h_a = self.dropout(h_a)
-        h_b = self.dropout(h_b)
+        # Attend over digit vectors: [B, S, S] @ [B, S, K] -> [B, S, K]
+        soft_a = attn_a @ digit_vectors.float()
+        soft_b = attn_b @ digit_vectors.float()
 
-        logits_a = self.head_a(h_a).view(B, S, self.num_digits, self.num_classes)
-        logits_b = self.head_b(h_b).view(B, S, self.num_digits, self.num_classes)
+        # Round to integer digits with STE for gradient flow
+        d_a = ste_round_clamp(soft_a, 0, 9)
+        d_b = ste_round_clamp(soft_b, 0, 9)
 
-        d_a = ste_argmax(logits_a)  # [B, S, K]
-        d_b = ste_argmax(logits_b)  # [B, S, K]
-
-        return d_a, d_b, logits_a, logits_b
+        return d_a, d_b, soft_a, soft_b

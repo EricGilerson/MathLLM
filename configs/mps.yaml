@@ -29,7 +29,7 @@ training:
   lr: 1.0e-3
   weight_decay: 0.01
   batch_size: 64
-  max_epochs: 30
+  max_epochs: 50
   checkpoint_every_steps: 0
   max_seq_len: 32
   warmup_steps: 10
@@ -51,6 +51,7 @@ training:
   aux_loss_weight: 1.0
   aux_loss_decay: 0.1
   phase1_aux_only: true
+  phase1_aux_threshold: 0.05  # don't leave phase 1 until extraction is this good
   curriculum_schedule: []  # disabled for pure arithmetic — full digit range from epoch 1
 
 evaluation:

@@ -1,18 +1,15 @@
 """Auxiliary losses for ARB training.
 
-The key auxiliary loss directly supervises digit extraction (Stage 1) against
-ground-truth operand digits using per-digit cross-entropy classification.
-
-Head A is supervised at the operator position (where operand A is most recent
-in the causal window), and head B at the '=' position (where operand B is
-most recent). This eliminates the recency bias that otherwise makes A harder
-to extract than B.
+The extraction loss supervises the soft digit outputs (attention-weighted
+digit vectors) against ground-truth digit values using MSE. Both heads are
+supervised at the '=' position where the full expression is visible.
+Separate Q/K attention projections per head learn to attend to different
+operand token positions.
 """
 
 from __future__ import annotations
 
 import torch
-import torch.nn.functional as F
 from torch import Tensor
 
 
@@ -25,81 +22,57 @@ def compute_extraction_loss(
     eq_positions: Tensor,
     op_positions: Tensor | None = None,
 ) -> Tensor:
-    """Compute cross-entropy loss between extracted logits and ground-truth digits.
+    """Compute MSE loss between soft-extracted digits and ground-truth digits.
 
-    Head A is supervised at op_position (operator token, where A is most recent).
-    Head B is supervised at eq_position ('=' token, where B is most recent).
-    If op_positions is not provided, both heads use eq_position.
+    Both heads are supervised at the '=' position. The attention mechanism
+    differentiates which operand to attend to via separate Q/K projections.
 
     Args:
-        arb_extractions: {layer_id: (logits_a, logits_b)} where values are
-            classification logits [B, S, K, C]
+        arb_extractions: {layer_id: (soft_a, soft_b)} where values are
+            continuous digit vectors [B, S, K]
         gt_digits_a: [B, K] ground-truth digit vector for operand A (float)
         gt_digits_b: [B, K] ground-truth digit vector for operand B (float)
         has_aux: [B] boolean mask (True for examples with valid aux targets)
         attention_mask: [B, S] (1 = real token, 0 = padding)
         eq_positions: [B] token index of the '=' sign
-        op_positions: [B] token index of the operator (+, -, *, etc.)
+        op_positions: [B] (unused, kept for API compatibility)
 
     Returns:
-        Scalar cross-entropy loss averaged over valid entries, or zero if none.
+        Scalar MSE loss averaged over valid entries, or zero if none.
     """
     if not arb_extractions or not has_aux.any():
-        for _layer_id, (logits_a, _logits_b) in arb_extractions.items():
-            return (logits_a * 0).sum()
+        for _layer_id, (soft_a, _soft_b) in arb_extractions.items():
+            return (soft_a * 0).sum()
         return gt_digits_a.new_zeros((), requires_grad=True)
 
-    B, S = attention_mask.shape
+    B = has_aux.shape[0]
 
-    # Target digits as long for cross-entropy: [B, K]
-    target_a = gt_digits_a.long()
-    target_b = gt_digits_b.long()
-
-    # Position masks: head A at operator, head B at '='
-    positions = torch.arange(S, device=attention_mask.device).unsqueeze(0)  # [1, S]
-    pos_a = op_positions if op_positions is not None else eq_positions
-    mask_a = (
-        has_aux.float().unsqueeze(1)
-        * attention_mask.float()
-        * (positions == pos_a.unsqueeze(1)).float()
-    )  # [B, S]
-    mask_b = (
-        has_aux.float().unsqueeze(1)
-        * attention_mask.float()
-        * (positions == eq_positions.unsqueeze(1)).float()
-    )  # [B, S]
-
+    # Gather soft digits at the '=' position for each example
+    # eq_positions: [B] -> index into sequence dim
     total_loss = gt_digits_a.new_zeros(())
     num_layers = 0
+    valid_mask = has_aux.float()  # [B]
+    count = valid_mask.sum()
 
-    for _layer_id, (logits_a, logits_b) in arb_extractions.items():
-        # logits_a, logits_b: [B, S, K, C]
-        K = logits_a.size(2)
-        C = logits_a.size(3)
+    if count == 0:
+        for _layer_id, (soft_a, _soft_b) in arb_extractions.items():
+            return (soft_a * 0).sum()
 
-        # Broadcast targets across sequence positions: [B, K] -> [B, S, K]
-        tgt_a = target_a.unsqueeze(1).expand(B, S, K)
-        tgt_b = target_b.unsqueeze(1).expand(B, S, K)
+    for _layer_id, (soft_a, soft_b) in arb_extractions.items():
+        # soft_a, soft_b: [B, S, K]
+        K = soft_a.size(2)
 
-        # Flatten for cross_entropy: [B*S*K, C] and [B*S*K]
-        ce_a = F.cross_entropy(
-            logits_a.reshape(-1, C), tgt_a.reshape(-1), reduction="none"
-        ).view(B, S, K)
-        ce_b = F.cross_entropy(
-            logits_b.reshape(-1, C), tgt_b.reshape(-1), reduction="none"
-        ).view(B, S, K)
+        # Gather at eq_position: [B, K]
+        idx = eq_positions.unsqueeze(1).unsqueeze(2).expand(B, 1, K)  # [B, 1, K]
+        pred_a = soft_a.gather(1, idx).squeeze(1)  # [B, K]
+        pred_b = soft_b.gather(1, idx).squeeze(1)  # [B, K]
 
-        # Apply separate masks per head: [B, S, 1] broadcast over K digits
-        masked_a = ce_a * mask_a.unsqueeze(2)
-        masked_b = ce_b * mask_b.unsqueeze(2)
+        # MSE per example: [B, K] -> [B]
+        mse_a = ((pred_a - gt_digits_a) ** 2).mean(dim=1)  # [B]
+        mse_b = ((pred_b - gt_digits_b) ** 2).mean(dim=1)  # [B]
 
-        count_a = mask_a.sum() * K
-        count_b = mask_b.sum() * K
-        layer_loss = gt_digits_a.new_zeros(())
-        if count_a > 0:
-            layer_loss = layer_loss + masked_a.sum() / count_a
-        if count_b > 0:
-            layer_loss = layer_loss + masked_b.sum() / count_b
+        # Masked average
+        layer_loss = ((mse_a + mse_b) * valid_mask).sum() / count
 
         total_loss = total_loss + layer_loss
         num_layers += 1

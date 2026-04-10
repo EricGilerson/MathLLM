@@ -84,6 +84,7 @@ class ARBTrainer:
         self.patience_counter = 0
         self.early_stopped = False
         self._current_phase = 0  # will be set on first epoch
+        self._last_aux_eval = float("inf")  # track extraction quality for phase gate
 
         # Pre-compute aux-eligible indices for Phase 1 filtering
         dataset = train_loader.dataset
@@ -106,10 +107,18 @@ class ARBTrainer:
     # ------------------------------------------------------------------
 
     def _get_phase(self, epoch: int) -> int:
-        """Determine training phase from epoch number."""
+        """Determine training phase from epoch number, gated by extraction quality.
+
+        Phase 1 continues until BOTH the minimum epoch count is reached AND
+        extraction eval loss drops below the configured threshold.
+        """
         p1 = self.config.phase1_epochs
         p2 = p1 + self.config.phase2_epochs
         if epoch < p1:
+            return 1
+        # Quality gate: stay in phase 1 if extraction isn't good enough
+        threshold = self.config.phase1_aux_threshold
+        if threshold > 0 and self._last_aux_eval > threshold:
             return 1
         if epoch < p2:
             return 2
@@ -372,7 +381,7 @@ class ARBTrainer:
             random.setstate(python_state)
         torch_state = state.get("torch")
         if torch_state is not None:
-            torch.set_rng_state(torch_state)
+            torch.set_rng_state(torch_state.cpu().byte())
         cuda_state = state.get("cuda")
         if cuda_state is not None and torch.cuda.is_available():
             torch.cuda.set_rng_state_all(cuda_state)
@@ -471,6 +480,7 @@ class ARBTrainer:
                 full_digits = self.config.curriculum_schedule[-1][1] if self.config.curriculum_schedule else None
                 if curriculum_max is None or curriculum_max >= (full_digits or 0):
                     aux_eval = self._evaluate_extraction()
+                    self._last_aux_eval = aux_eval
                     epoch_bar.set_postfix(loss=f"{epoch_loss_value:.4f}", aux_eval=f"{aux_eval:.4f}", phase=phase)
                 else:
                     epoch_bar.set_postfix(loss=f"{epoch_loss_value:.4f}", phase=phase)
@@ -709,6 +719,7 @@ class ARBTrainer:
             "steps_per_epoch": self.steps_per_epoch,
             "max_epochs": self.config.max_epochs,
             "current_phase": self._current_phase,
+            "last_aux_eval": self._last_aux_eval,
             "rng_state": self._capture_rng_state(),
         }
 
@@ -753,10 +764,16 @@ class ARBTrainer:
         # Restore early stopping state AFTER phase config (which resets them)
         self.best_eval_loss = ckpt.get("best_eval_loss", float("inf"))
         self.patience_counter = ckpt.get("patience_counter", 0)
+        self._last_aux_eval = ckpt.get("last_aux_eval", float("inf"))
 
         # Load optimizer state after rebuilding with correct param groups
         try:
             self.optimizer.load_state_dict(ckpt["optimizer"])
+            # Move optimizer state tensors to match parameter device
+            for state in self.optimizer.state.values():
+                for k, v in state.items():
+                    if isinstance(v, torch.Tensor):
+                        state[k] = v.to(self.device)
         except (ValueError, KeyError):
             logger.warning(
                 "Could not restore optimizer state (likely phase transition "

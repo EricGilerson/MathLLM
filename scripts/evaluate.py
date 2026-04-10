@@ -52,13 +52,14 @@ def main():
 
         logger.info(f"Loading model: {config.training.base_model}")
         model = GPT2WithARB(config)
+        model.build_token_digit_tables(tokenizer)
 
         # Load checkpoint if provided
         if args.checkpoint:
             logger.info(f"Loading checkpoint: {args.checkpoint}")
             ckpt = torch.load(args.checkpoint, map_location=device, weights_only=False)
             for key, state in ckpt["arb_state"].items():
-                model.arbs[key].load_state_dict(state)
+                model.arbs[key].load_state_dict(state, strict=False)
 
         model.to(device)
 

@@ -176,10 +176,10 @@ class GPT2WithARB(nn.Module):
 
             # Insert ARB after this layer if configured
             if i in self.arb_positions:
-                hidden_states, d_a, d_b, soft_a, soft_b = self.arbs[str(i)](
+                hidden_states, d_a, d_b = self.arbs[str(i)](
                     hidden_states, input_ids, attention_mask
                 )
-                arb_extractions[i] = (soft_a, soft_b)  # soft digit values for aux loss
+                arb_extractions[i] = (d_a, d_b)  # deterministic digit vectors
 
         # Final layer norm
         hidden_states = transformer.ln_f(hidden_states)

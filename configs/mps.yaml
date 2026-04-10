@@ -45,13 +45,13 @@ training:
   max_eval_batches: 5
   eval_batch_size: 128
   # Phased training
-  phase1_epochs: 8   # extraction-only (faster convergence with higher LR)
-  phase2_epochs: 12  # extraction + injection, aux loss active
-  phase3_epochs: 10  # end-to-end, aux loss decayed
+  phase1_epochs: 0   # extraction is deterministic — no Phase 1 needed
+  phase2_epochs: 30  # injection training (LM loss only)
+  phase3_epochs: 20  # continued training
   aux_loss_weight: 1.0
   aux_loss_decay: 0.1
   phase1_aux_only: true
-  phase1_aux_threshold: 0.05  # don't leave phase 1 until extraction is this good
+  phase1_aux_threshold: 0.1  # don't leave phase 1 until attention CE this low
   curriculum_schedule: []  # disabled for pure arithmetic — full digit range from epoch 1
 
 evaluation:

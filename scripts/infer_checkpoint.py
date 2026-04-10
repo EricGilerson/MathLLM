@@ -74,29 +74,25 @@ def digits_to_int(digits: list[int]) -> int:
     return sum(digit * (10 ** idx) for idx, digit in enumerate(digits))
 
 
-def decode_digit_logits(logits: torch.Tensor) -> list[int]:
-    """Decode digit values — either soft floats (round) or classification logits (argmax)."""
-    if logits.dim() == 1:
-        # Soft digit vector [K] — round to nearest integer
-        return logits.round().clamp(0, 9).long().tolist()
-    # Classification logits [K, C] — argmax
-    return logits.argmax(dim=-1).tolist()
-
-
 def collect_layer_extractions(
     arb_extractions: dict[int, tuple[torch.Tensor, torch.Tensor]],
-    token_index_a: int,
-    token_index_b: int,
+    eq_index: int,
 ) -> list[LayerExtraction]:
-    """Decode layer extractions for a single-item batch at per-head positions."""
+    """Decode deterministic digit extractions from each ARB layer.
+
+    arb_extractions contain (d_a, d_b) digit vectors [B, S, K].
+    All positions have the same values (broadcast), so eq_index is cosmetic.
+    """
     layers: list[LayerExtraction] = []
-    for layer_id, (logits_a, logits_b) in sorted(arb_extractions.items()):
-        digits_a = decode_digit_logits(logits_a[0, token_index_a])
-        digits_b = decode_digit_logits(logits_b[0, token_index_b])
+    for layer_id, (d_a, d_b) in sorted(arb_extractions.items()):
+        # All positions have the same digits; pick eq_index for display
+        digits_a = d_a[0, eq_index].long().tolist()
+        digits_b = d_b[0, eq_index].long().tolist()
+
         layers.append(
             LayerExtraction(
                 layer_id=layer_id,
-                token_index=token_index_b,
+                token_index=eq_index,
                 digits_a=digits_a,
                 digits_b=digits_b,
                 value_a=digits_to_int(digits_a),
@@ -197,7 +193,7 @@ def analyze_prompt(
     eq_index = int(attention_mask[0].sum().item()) - 1
     op_index = find_operator_token(tokenizer, prompt)
     extractions = collect_layer_extractions(
-        outputs.get("arb_extractions", {}), eq_index, eq_index
+        outputs.get("arb_extractions", {}), eq_index
     )
     return extractions, op_index, eq_index
 

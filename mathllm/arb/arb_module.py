@@ -110,10 +110,10 @@ class ArithmeticResidualBlock(nn.Module):
             d_a_cont: [batch, seq_len, num_digits] — continuous (pre-round) operand A
             d_b_cont: [batch, seq_len, num_digits] — continuous (pre-round) operand B
         """
-        # Stage 1: Extract operand digit vectors via token lookup + attention
-        d_a, d_b, d_a_cont, d_b_cont = self.extract(h, input_ids, attention_mask)
+        # Stage 1: Deterministic extraction via token lookup
+        d_a, d_b, _, _ = self.extract(h, input_ids, attention_mask)
 
-        # Stage 2: Encode to RNS circles (uses rounded values)
+        # Stage 2: Encode to RNS circles
         a_circle = self.encode(d_a)          # [B, S, m, 2]
         b_circle = self.encode(d_b)          # [B, S, m, 2]
         b_exp_circle = self.encode.encode_exponent(d_b)  # [B, S, m, 2]
@@ -124,7 +124,7 @@ class ArithmeticResidualBlock(nn.Module):
 
         # Stage 4: Inject into hidden state with residual connection
         h_prime = self.inject(results, h)
-        return h_prime, d_a, d_b, d_a_cont, d_b_cont
+        return h_prime, d_a, d_b
 
     def count_parameters(self) -> dict[str, int]:
         """Count learned vs frozen parameters."""

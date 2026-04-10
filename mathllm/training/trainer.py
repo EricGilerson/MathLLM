@@ -107,62 +107,38 @@ class ARBTrainer:
     # ------------------------------------------------------------------
 
     def _get_phase(self, epoch: int) -> int:
-        """Determine training phase from epoch number, gated by extraction quality.
+        """Determine training phase from epoch number.
 
-        Phase 1 continues until BOTH the minimum epoch count is reached AND
-        extraction eval loss drops below the configured threshold.
+        With deterministic extraction, Phase 1 is skipped entirely.
+        All epochs train injection (Phase 2), then Phase 3 decays aux weight.
         """
-        p1 = self.config.phase1_epochs
-        p2 = p1 + self.config.phase2_epochs
-        if epoch < p1:
-            return 1
-        # Quality gate: stay in phase 1 if extraction isn't good enough
-        threshold = self.config.phase1_aux_threshold
-        if threshold > 0 and self._last_aux_eval > threshold:
-            return 1
+        p2 = self.config.phase2_epochs
         if epoch < p2:
             return 2
         return 3
 
     def _configure_phase(self, phase: int) -> None:
-        """Freeze/unfreeze parameters for the given phase and rebuild optimizer."""
+        """Configure parameters for the given phase and rebuild optimizer.
+
+        With deterministic extraction, only injection parameters are trainable.
+        """
         if phase == self._current_phase:
             return
 
         old_phase = self._current_phase
         self._current_phase = phase
 
-        if phase == 1:
-            # Extraction only: freeze injection, disable extraction dropout
-            for arb in self.model.arbs.values():
-                for p in arb.extract.parameters():
-                    p.requires_grad = True
-                for p in arb.inject.parameters():
-                    p.requires_grad = False
-                # Phase 1 is precision regression — dropout adds noise
-                arb.extract.dropout.p = 0.0
-        else:
-            # Phase 2 & 3: everything trainable, restore dropout
-            for arb in self.model.arbs.values():
-                for p in arb.extract.parameters():
-                    p.requires_grad = True
-                for p in arb.inject.parameters():
-                    p.requires_grad = True
-                # Restore configured dropout for generalization
-                arb.extract.dropout.p = self.model.config.arb.dropout
+        # Extraction is deterministic — ensure its params are frozen
+        for arb in self.model.arbs.values():
+            for p in arb.extract.parameters():
+                p.requires_grad = False
+            for p in arb.inject.parameters():
+                p.requires_grad = True
 
-        # Reset early stopping on phase transitions — flat Phase 1 eval
-        # should not count against Phase 2's patience budget.
+        # Reset early stopping on phase transitions
         self.patience_counter = 0
         self.best_eval_loss = float("inf")
-
-        # Adjust steps_per_epoch for filtered Phase 1 dataset
-        if phase == 1 and self.config.phase1_aux_only and self._aux_indices:
-            filtered_size = len(self._aux_indices)
-            batch_size = self.train_loader.batch_size or 1
-            self.steps_per_epoch = max(1, filtered_size // batch_size // self.accumulation_steps)
-        else:
-            self.steps_per_epoch = self._full_steps_per_epoch
+        self.steps_per_epoch = self._full_steps_per_epoch
 
         self._build_optimizer()
         logger.info(
@@ -195,31 +171,10 @@ class ARBTrainer:
             (total_loss, lm_loss_value, aux_loss_value) for logging.
         """
         lm_loss = outputs["loss"]
-        arb_extractions = outputs.get("arb_extractions", {})
 
-        # Compute auxiliary extraction loss
-        aux_loss = compute_extraction_loss(
-            arb_extractions=arb_extractions,
-            gt_digits_a=batch["digits_a"],
-            gt_digits_b=batch["digits_b"],
-            has_aux=batch["has_aux"],
-            attention_mask=batch["attention_mask"],
-            eq_positions=batch["eq_position"],
-            op_positions=batch.get("op_position"),
-        )
-
-        aux_weight = self.config.aux_loss_weight
-        if phase == 3:
-            aux_weight *= self.config.aux_loss_decay
-
-        if phase == 1:
-            # Extraction-only: use only auxiliary loss
-            total_loss = aux_weight * aux_loss
-        else:
-            # Phase 2 & 3: LM loss + weighted aux loss
-            total_loss = lm_loss + aux_weight * aux_loss
-
-        return total_loss, lm_loss.item(), aux_loss.item()
+        # Extraction is deterministic — no aux loss needed.
+        # Total loss is just the LM next-token prediction loss.
+        return lm_loss, lm_loss.item(), 0.0
 
     # ------------------------------------------------------------------
     # LR schedule
@@ -453,8 +408,7 @@ class ARBTrainer:
                 break
 
             epoch_loss_value = epoch_loss if epoch_loss is not None else 0.0
-            if self.eval_loader is not None and phase > 1:
-                # LM evaluation is only meaningful when injection is active (Phase 2+)
+            if self.eval_loader is not None:
                 eval_loss = self._evaluate()
                 history["eval_loss"].append(eval_loss)
                 epoch_bar.set_postfix(loss=f"{epoch_loss_value:.4f}", eval=f"{eval_loss:.4f}", phase=phase)
@@ -472,18 +426,6 @@ class ARBTrainer:
                         f"no improvement for {self.config.early_stopping_patience} evals"
                     )
                     self.early_stopped = True
-            elif self.eval_loader is not None and phase == 1:
-                # Phase 1: evaluate extraction quality only (no early stopping)
-                # Skip eval during early curriculum — results are misleading when
-                # model only trains on small digits but eval uses the full range.
-                curriculum_max = self._get_curriculum_max_digits(epoch)
-                full_digits = self.config.curriculum_schedule[-1][1] if self.config.curriculum_schedule else None
-                if curriculum_max is None or curriculum_max >= (full_digits or 0):
-                    aux_eval = self._evaluate_extraction()
-                    self._last_aux_eval = aux_eval
-                    epoch_bar.set_postfix(loss=f"{epoch_loss_value:.4f}", aux_eval=f"{aux_eval:.4f}", phase=phase)
-                else:
-                    epoch_bar.set_postfix(loss=f"{epoch_loss_value:.4f}", phase=phase)
 
             self._save_checkpoint(f"epoch_{epoch + 1}")
 

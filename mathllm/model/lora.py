@@ -30,5 +30,7 @@ class LoRALinear(nn.Module):
 
     def forward(self, x: Tensor) -> Tensor:
         base_out = self.base_linear(x)
-        lora_out = (x @ self.lora_B.T) @ self.lora_A.T
-        return base_out + self.scale * lora_out
+        # Compute LoRA path in float32 to avoid overflow on large vocab projections
+        x_f = x.float()
+        lora_out = (x_f @ self.lora_B.T) @ self.lora_A.T
+        return base_out + self.scale * lora_out.to(dtype=base_out.dtype)

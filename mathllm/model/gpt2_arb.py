@@ -495,7 +495,7 @@ class TransformerWithARB(nn.Module):
         if valid_count.item() == 0:
             return flat_logits.new_zeros(())
         return F.cross_entropy(
-            flat_logits, flat_labels, ignore_index=-100, reduction="sum",
+            flat_logits.float(), flat_labels, ignore_index=-100, reduction="sum",
         ) / valid_count
 
     @torch.no_grad()

@@ -56,9 +56,12 @@ class ArithmeticResidualBlock(nn.Module):
         self.num_results = num_results
         self.eq_token_id = eq_token_id
 
-        # Each operation outputs m primes * 2 (cos, sin) = 2m dimensions
-        num_primes = len(primes)
-        total_result_dim = num_results * num_primes * 2
+        # Injection receives decoded digit vectors, not raw circle encodings.
+        # 5 operations: add (unsigned), sub (signed → digits + sign),
+        # mul (unsigned), exp (unsigned), div (unsigned)
+        # Sub has K+1 dims (K digits + sign bit), others have K dims each.
+        # Total: 4*K + (K+1) = 5K + 1
+        total_result_dim = num_results * num_digits + 1  # +1 for sub sign bit
 
         # Stage 1: Learned extraction
         self.extract = OperandExtractor(
@@ -96,12 +99,60 @@ class ArithmeticResidualBlock(nn.Module):
         for param in self.compute.parameters():
             param.requires_grad = False
 
+    def _decode_to_digits(
+        self,
+        a_circle: Tensor,
+        b_circle: Tensor,
+        b_exp_circle: Tensor,
+    ) -> Tensor:
+        """Compute all operations and decode results to digit vectors.
+
+        Instead of passing raw circle encodings (cos/sin pairs) to the injector,
+        we CRT-reconstruct each operation's result into an actual integer and
+        decompose it into base-10 digits. This gives the injector clean, linearly
+        separable features instead of opaque periodic encodings.
+
+        Returns:
+            [B, S, 5*K+1] — concatenated digit vectors for all 5 operations.
+            Sub includes a sign bit. All values detached (no grad through CRT).
+        """
+        B, S = a_circle.shape[:2]
+        device = a_circle.device
+
+        # Compute all five operations in circle space
+        add_c = self.compute.circle_add(a_circle, b_circle)
+        sub_c = self.compute.circle_sub(a_circle, b_circle)
+        mul_c = self.compute.circle_mul(a_circle, b_circle)
+        exp_c = self.compute.circle_exp(a_circle, b_exp_circle)
+        div_c = self.compute.circle_div(a_circle, b_circle)
+
+        # CRT reconstruct to integers and decompose to digits.
+        # This is frozen/detached — no gradients flow through CRT.
+        with torch.no_grad():
+            add_n = self.compute.crt_reconstruct(add_c)         # [B, S]
+            sub_n = self.compute.crt_reconstruct_signed(sub_c)  # [B, S] signed
+            mul_n = self.compute.crt_reconstruct(mul_c)
+            exp_n = self.compute.crt_reconstruct(exp_c)
+            div_n = self.compute.crt_reconstruct(div_c)
+
+            add_digits = self.compute.integer_to_digits(add_n)                  # [B, S, K]
+            sub_digits = self.compute.integer_to_digits_with_sign(sub_n)        # [B, S, K+1]
+            mul_digits = self.compute.integer_to_digits(mul_n)
+            exp_digits = self.compute.integer_to_digits(exp_n)
+            div_digits = self.compute.integer_to_digits(div_n)
+
+        # Move back to original device if CRT used CPU (MPS path)
+        result = torch.cat(
+            [add_digits, sub_digits, mul_digits, exp_digits, div_digits], dim=-1
+        )
+        return result.to(device=device, dtype=a_circle.dtype)
+
     def forward(
         self,
         h: Tensor,
         input_ids: Tensor,
         attention_mask: Tensor | None = None,
-    ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
+    ) -> tuple[Tensor, Tensor, Tensor]:
         """Run the full ARB on the hidden state.
 
         Args:
@@ -113,8 +164,6 @@ class ArithmeticResidualBlock(nn.Module):
             h': [batch, seq_len, hidden_dim] — h + delta_h from arithmetic
             d_a: [batch, seq_len, num_digits] — extracted digit vector for operand A
             d_b: [batch, seq_len, num_digits] — extracted digit vector for operand B
-            d_a_cont: [batch, seq_len, num_digits] — continuous (pre-round) operand A
-            d_b_cont: [batch, seq_len, num_digits] — continuous (pre-round) operand B
         """
         # Stage 1: Deterministic extraction via token lookup
         d_a, d_b, _, _ = self.extract(h, input_ids, attention_mask)
@@ -124,15 +173,13 @@ class ArithmeticResidualBlock(nn.Module):
         b_circle = self.encode(d_b)          # [B, S, m, 2]
         b_exp_circle = self.encode.encode_exponent(d_b)  # [B, S, m, 2]
 
-        # Stage 3: Compute all operations in parallel
-        # Returns flattened circle encodings: [B, S, 5 * m * 2]
-        results = self.compute(a_circle, b_circle, b_exp_circle)
+        # Stage 3: Compute + CRT decode to digit vectors
+        # [B, S, 5*K+1] — clean decimal digits, not circle encodings
+        results = self._decode_to_digits(a_circle, b_circle, b_exp_circle)
 
         # Build injection mask: only inject at '=' position and after.
-        # For inputs without '=', no injection occurs.
         B, S = input_ids.shape
         eq_present = (input_ids == self.eq_token_id)  # [B, S]
-        # Find first '=' in each sequence; if none, set to S (past end)
         has_eq = eq_present.any(dim=1)  # [B]
         eq_pos = torch.where(
             has_eq,
@@ -143,7 +190,7 @@ class ArithmeticResidualBlock(nn.Module):
         inject_mask = (positions >= eq_pos.unsqueeze(1)).float()  # [B, S]
         inject_mask = inject_mask.unsqueeze(2)  # [B, S, 1] for broadcasting
 
-        # Stage 4: Inject into hidden state, masked to answer positions only
+        # Stage 4: Inject decoded digits into hidden state
         h_prime = self.inject(results * inject_mask, h)
         return h_prime, d_a, d_b
 

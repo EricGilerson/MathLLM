@@ -65,7 +65,10 @@ class ResultInjector(nn.Module):
         Returns:
             h': [batch, seq, hidden_dim] — h + gate * delta_h
         """
+        # Compute in the projection's dtype (float32) for gradient precision,
+        # then cast delta to match the hidden state dtype (may be float16).
+        results = results.to(dtype=self.projection.weight.dtype)
         gate = torch.sigmoid(self.gate_logit)
         delta_h = self.projection(results)
         delta_h = self.dropout(delta_h)
-        return h + gate * delta_h
+        return h + gate * delta_h.to(dtype=h.dtype)

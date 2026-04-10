@@ -90,6 +90,7 @@ class ArithmeticDataGenerator:
         self.rng = random.Random(config.seed)
         self.negative_sampler = NegativeExampleSampler(seed=config.seed)
         self.max_value = config.max_value
+        self.max_result = config.max_result if config.max_result > 0 else config.max_value
 
     def _sample_operands(self, num_digits: int | None = None) -> tuple[int, int]:
         """Sample two operands with controlled digit count."""
@@ -102,7 +103,7 @@ class ArithmeticDataGenerator:
     def _generate_addition(self) -> ArithmeticRecord | None:
         a, b = self._sample_operands()
         result = a + b
-        if abs(result) > self.max_value:
+        if abs(result) > self.max_result:
             return None
         template = self.rng.choice(ADDITION_TEMPLATES)
         text = template.format(a=a, b=b, result=result)
@@ -124,7 +125,7 @@ class ArithmeticDataGenerator:
         a = self.rng.randint(low1, 10**d1 - 1)
         b = self.rng.randint(low2, 10**d2 - 1)
         result = a * b
-        if abs(result) > self.max_value:
+        if abs(result) > self.max_result:
             return None
         template = self.rng.choice(MULTIPLICATION_TEMPLATES)
         text = template.format(a=a, b=b, result=result)
@@ -135,10 +136,10 @@ class ArithmeticDataGenerator:
         if b == 0:
             a = self.rng.randint(1, 999)
         else:
-            a_max = int(self.max_value ** (1.0 / max(b, 1)))
+            a_max = int(self.max_result ** (1.0 / max(b, 1)))
             a = self.rng.randint(1, max(a_max, 2))
         result = a**b
-        if result > self.max_value:
+        if result > self.max_result:
             return None
         template = self.rng.choice(EXPONENTIATION_TEMPLATES)
         text = template.format(a=a, b=b, result=result)
@@ -147,9 +148,9 @@ class ArithmeticDataGenerator:
     def _generate_exact_division(self) -> ArithmeticRecord | None:
         """Generate exact division (no remainder)."""
         b = self.rng.randint(1, 999)
-        quotient = self.rng.randint(1, max(1, self.max_value // max(b, 1)))
+        quotient = self.rng.randint(1, max(1, self.max_result // max(b, 1)))
         a = b * quotient
-        if a > self.max_value:
+        if a > self.max_result:
             return None
         template = self.rng.choice(DIVISION_EXACT_TEMPLATES)
         text = template.format(a=a, b=b, result=quotient)
@@ -568,7 +569,7 @@ class ArithmeticDataGenerator:
     def _generate_pure_addition(self) -> ArithmeticRecord | None:
         a, b = self._sample_operands()
         result = a + b
-        if abs(result) > self.max_value:
+        if abs(result) > self.max_result:
             return None
         return ArithmeticRecord(text=f"{a}+{b}={result}", op_type="add", operand_a=a, operand_b=b, result=result)
 
@@ -585,7 +586,7 @@ class ArithmeticDataGenerator:
         a = self.rng.randint(low1, 10**d1 - 1)
         b = self.rng.randint(low2, 10**d2 - 1)
         result = a * b
-        if abs(result) > self.max_value:
+        if abs(result) > self.max_result:
             return None
         return ArithmeticRecord(text=f"{a}*{b}={result}", op_type="mul", operand_a=a, operand_b=b, result=result)
 
@@ -594,18 +595,18 @@ class ArithmeticDataGenerator:
         if b == 0:
             a = self.rng.randint(1, 999)
         else:
-            a_max = int(self.max_value ** (1.0 / max(b, 1)))
+            a_max = int(self.max_result ** (1.0 / max(b, 1)))
             a = self.rng.randint(1, max(a_max, 2))
         result = a**b
-        if result > self.max_value:
+        if result > self.max_result:
             return None
         return ArithmeticRecord(text=f"{a}^{b}={result}", op_type="exp", operand_a=a, operand_b=b, result=result)
 
     def _generate_pure_division(self) -> ArithmeticRecord | None:
         b = self.rng.randint(1, 999)
-        quotient = self.rng.randint(1, max(1, self.max_value // max(b, 1)))
+        quotient = self.rng.randint(1, max(1, self.max_result // max(b, 1)))
         a = b * quotient
-        if a > self.max_value:
+        if a > self.max_result:
             return None
         return ArithmeticRecord(text=f"{a}/{b}={quotient}", op_type="div", operand_a=a, operand_b=b, result=quotient)
 

@@ -16,14 +16,15 @@ arb:
   injection_pos_dim: 16
   injection_mlp_hidden: 128
   lora_rank: 8
-  lora_alpha: 1.0
+  lora_alpha: 8.0
 
 data:
   num_positive: 50000
   num_negative: 0
   num_edge_cases: 0
   max_digits: 3
-  max_value: 999  # true 3-digit operands; multiplication gives 4-6 digit results
+  max_value: 999  # true 3-digit operands
+  max_result: 999999  # allow 6-digit results (999*999=998001)
   seed: 42
   output_dir: "data_360m/"
   pure_arithmetic: true

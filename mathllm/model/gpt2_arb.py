@@ -286,6 +286,13 @@ class TransformerWithARB(nn.Module):
         else:
             extended_mask = None
 
+        # Determine if we should defer the last ARB to after norm
+        last_arb_pos = max(self.arb_positions) if self.arb_positions else -1
+        defer_last = (
+            getattr(self.config.arb, "inject_after_norm", True)
+            and last_arb_pos >= 0
+        )
+
         # Iterate through transformer blocks, inserting ARBs
         presents = []
         arb_extractions: dict[int, tuple[Tensor, Tensor]] = {}
@@ -309,14 +316,24 @@ class TransformerWithARB(nn.Module):
                 presents.append(block_output[1])
 
             # Insert ARB after this layer if configured
-            if i in self.arb_positions:
+            # (skip the last ARB if it will be deferred to after norm)
+            if i in self.arb_positions and not (defer_last and i == last_arb_pos):
                 hidden_states, d_a, d_b = self.arbs[str(i)](
                     hidden_states, input_ids, attention_mask
                 )
                 arb_extractions[i] = (d_a, d_b)
 
-        # Final layer norm + LM head (with optional LoRA)
+        # Final layer norm
         hidden_states = transformer.ln_f(hidden_states)
+
+        # Post-norm injection for last-layer ARB (signal not diluted by norm)
+        if defer_last:
+            hidden_states, d_a, d_b = self.arbs[str(last_arb_pos)](
+                hidden_states, input_ids, attention_mask
+            )
+            arb_extractions[last_arb_pos] = (d_a, d_b)
+
+        # LM head (with optional LoRA)
         if self.lora_head is not None:
             logits = self.lora_head(hidden_states)
         else:
@@ -383,6 +400,14 @@ class TransformerWithARB(nn.Module):
                 attention_mask, hidden_states, past_len
             )
 
+        # Determine if we should defer the last ARB to after norm
+        # (avoids RMSNorm diluting the injection signal)
+        last_arb_pos = max(self.arb_positions) if self.arb_positions else -1
+        defer_last = (
+            getattr(self.config.arb, "inject_after_norm", True)
+            and last_arb_pos >= 0
+        )
+
         # Iterate through decoder layers, inserting ARBs
         arb_extractions: dict[int, tuple[Tensor, Tensor]] = {}
         for i, layer in enumerate(inner_model.layers):
@@ -405,14 +430,24 @@ class TransformerWithARB(nn.Module):
                 hidden_states = layer_output
 
             # Insert ARB after this layer if configured
-            if i in self.arb_positions:
+            # (skip the last ARB if it will be deferred to after norm)
+            if i in self.arb_positions and not (defer_last and i == last_arb_pos):
                 hidden_states, d_a, d_b = self.arbs[str(i)](
                     hidden_states, input_ids, attention_mask
                 )
                 arb_extractions[i] = (d_a, d_b)
 
-        # Final RMSNorm + LM head (with optional LoRA)
+        # Final RMSNorm
         hidden_states = inner_model.norm(hidden_states)
+
+        # Post-norm injection for last-layer ARB (signal not diluted by norm)
+        if defer_last:
+            hidden_states, d_a, d_b = self.arbs[str(last_arb_pos)](
+                hidden_states, input_ids, attention_mask
+            )
+            arb_extractions[last_arb_pos] = (d_a, d_b)
+
+        # LM head (with optional LoRA)
         if self.lora_head is not None:
             logits = self.lora_head(hidden_states)
         else:

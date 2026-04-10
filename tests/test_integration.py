@@ -73,13 +73,17 @@ class TestModelIntegration:
 
     def test_gradient_flow(self, config):
         """ARB parameters should receive gradients after backward pass."""
+        from transformers import AutoTokenizer
+        tokenizer = AutoTokenizer.from_pretrained(config.training.base_model)
+
         model = _build_model_with_tables(config)
         # Set W_proj non-zero to enable gradient flow
         for arb in model.arbs.values():
             with torch.no_grad():
                 arb.inject.projection.weight.fill_(0.001)
 
-        input_ids = torch.tensor([[50, 347, 12, 291, 796]])
+        # Use input containing '=' so the injection mask is non-zero
+        input_ids = tokenizer("5+3=8", return_tensors="pt")["input_ids"]
         labels = input_ids.clone()
 
         outputs = model(input_ids=input_ids, labels=labels)

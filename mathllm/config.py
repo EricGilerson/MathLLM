@@ -31,6 +31,7 @@ class ARBConfig:
     injection_mlp_hidden: int = 0  # MLP hidden dim for injection (0 = linear)
     lora_rank: int = 0  # LoRA rank for LM head (0 = disabled)
     lora_alpha: float = 1.0  # LoRA scaling factor
+    inject_after_norm: bool = True  # Inject after final norm to avoid signal dilution
 
 
 @dataclass
@@ -40,6 +41,7 @@ class DataConfig:
     num_edge_cases: int = 10000
     max_digits: int = 10
     max_value: int = 1_000_000_000
+    max_result: int = 0  # Max result magnitude. 0 = fall back to max_value.
     seed: int = 42
     output_dir: str = "data/"
     pure_arithmetic: bool = False  # Generate only "A op B = C" format

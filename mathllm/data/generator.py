@@ -571,12 +571,12 @@ class ArithmeticDataGenerator:
         result = a + b
         if abs(result) > self.max_result:
             return None
-        return ArithmeticRecord(text=f"{a}+{b}={result}", op_type="add", operand_a=a, operand_b=b, result=result)
+        return ArithmeticRecord(text=f"{a}+{b}={result}\n", op_type="add", operand_a=a, operand_b=b, result=result)
 
     def _generate_pure_subtraction(self) -> ArithmeticRecord | None:
         a, b = self._sample_operands()
         result = a - b
-        return ArithmeticRecord(text=f"{a}-{b}={result}", op_type="sub", operand_a=a, operand_b=b, result=result)
+        return ArithmeticRecord(text=f"{a}-{b}={result}\n", op_type="sub", operand_a=a, operand_b=b, result=result)
 
     def _generate_pure_multiplication(self) -> ArithmeticRecord | None:
         d1 = self.rng.randint(1, min(5, self.config.max_digits))
@@ -588,7 +588,7 @@ class ArithmeticDataGenerator:
         result = a * b
         if abs(result) > self.max_result:
             return None
-        return ArithmeticRecord(text=f"{a}*{b}={result}", op_type="mul", operand_a=a, operand_b=b, result=result)
+        return ArithmeticRecord(text=f"{a}*{b}={result}\n", op_type="mul", operand_a=a, operand_b=b, result=result)
 
     def _generate_pure_exponentiation(self) -> ArithmeticRecord | None:
         b = self.rng.randint(0, 15)
@@ -600,7 +600,7 @@ class ArithmeticDataGenerator:
         result = a**b
         if result > self.max_result:
             return None
-        return ArithmeticRecord(text=f"{a}^{b}={result}", op_type="exp", operand_a=a, operand_b=b, result=result)
+        return ArithmeticRecord(text=f"{a}^{b}={result}\n", op_type="exp", operand_a=a, operand_b=b, result=result)
 
     def _generate_pure_division(self) -> ArithmeticRecord | None:
         b = self.rng.randint(1, 999)
@@ -608,7 +608,7 @@ class ArithmeticDataGenerator:
         a = b * quotient
         if a > self.max_result:
             return None
-        return ArithmeticRecord(text=f"{a}/{b}={quotient}", op_type="div", operand_a=a, operand_b=b, result=quotient)
+        return ArithmeticRecord(text=f"{a}/{b}={quotient}\n", op_type="div", operand_a=a, operand_b=b, result=quotient)
 
     def _generate_pure_example(self) -> ArithmeticRecord | None:
         """Generate one pure arithmetic example (A op B = C)."""

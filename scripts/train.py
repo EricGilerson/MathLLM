@@ -30,13 +30,15 @@ def _disable_torch_debug_noise() -> None:
         "AOT_INDUCTOR_DEBUG_COMPILE": "0",
         "FX_GRAPH_SHOW_DEVICE": "0",
         "FX_GRAPH_SHOW_STRIDE": "0",
+        "INDUCTOR_OUTPUT_CODE": "0",
     }
     for key, value in noisy_env_defaults.items():
         os.environ[key] = value
 
-    # TORCH_LOGS has precedence over torch._logging.set_logs(), so clear it
-    # entirely unless the caller explicitly opts in to keeping Torch debug logs.
+    # TORCH_LOGS and TORCH_TRACE have precedence over programmatic config,
+    # so clear them unless the caller explicitly opts in.
     os.environ.pop("TORCH_LOGS", None)
+    os.environ.pop("TORCH_TRACE", None)
 
 
 _disable_torch_debug_noise()
@@ -101,6 +103,20 @@ def _configure_torch_logging() -> None:
         }
 
     torch._logging.set_logs(**kwargs)
+
+    # Some torch versions still emit FX/Inductor graph traces via their own
+    # loggers even after set_logs(). Force them to ERROR as a belt-and-suspenders
+    # measure.
+    for name in (
+        "torch._dynamo",
+        "torch._inductor",
+        "torch._functorch",
+        "torch.fx",
+        "torch._dynamo.output_graph",
+        "torch._inductor.graph",
+        "torch._inductor.compile_fx",
+    ):
+        py_logging.getLogger(name).setLevel(py_logging.ERROR)
 
 
 def main():
@@ -200,6 +216,15 @@ def main():
     import torch._dynamo
     torch._dynamo.config.verbose = False
     torch._dynamo.config.suppress_errors = True
+    if hasattr(torch, "_inductor") and hasattr(torch._inductor, "config"):
+        ic = torch._inductor.config
+        if hasattr(ic, "trace"):
+            ic.trace.enabled = False
+            ic.trace.graph_diagram = False
+        if hasattr(ic, "output_code"):
+            ic.output_code = False
+        if hasattr(ic, "debug"):
+            ic.debug = False
     _configure_torch_logging()
     model.to(device)
     model.prepare_for_device(device)
@@ -207,7 +232,7 @@ def main():
         if hasattr(torch, "set_float32_matmul_precision"):
             torch.set_float32_matmul_precision("high")
         logger.info("Compiling model forward pass with torch.compile...")
-        model.forward = torch.compile(model.forward, mode="reduce-overhead")
+        model.forward = torch.compile(model.forward)
 
     # Create trainer
     trainer = ARBTrainer(

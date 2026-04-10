@@ -32,7 +32,7 @@ data:
   max_value: 999
   max_result: 999999
   seed: 42
-  output_dir: "data_360m_v2/"
+  output_dir: "data_360m/"
   pure_arithmetic: true
 
 training:
@@ -46,13 +46,13 @@ training:
   warmup_steps: 100
   grad_clip: 1.0
   log_every: 10
-  eval_every: 200
-  checkpoint_dir: "checkpoints_360m_v2/"
-  final_model_dir: "trained_model_360m_v2/"
+  eval_every: 0
+  checkpoint_dir: "checkpoints_360m/"
+  final_model_dir: "trained_model_360m/"
   auto_resume_latest: true
   device: "auto"
   answer_only_loss: true
-  early_stopping_patience: 8
+  early_stopping_patience: 50
   max_eval_batches: 20
   eval_batch_size: 128
   phase1_epochs: 0

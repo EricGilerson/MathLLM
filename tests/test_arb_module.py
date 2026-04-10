@@ -30,7 +30,7 @@ class TestARBModule:
         arb = _build_test_arb()
         h = torch.randn(2, 4, 64)
         # "25 + 50 =" -> tokens [25, 10(+), 50, 99(=)]
-        ids = torch.tensor([[25, 10, 50, 99], [30, 12, 40, 99]])
+        ids = torch.tensor([[25, 10, 50, 99], [30, 12, 40, 28]])
         h_out, d_a, d_b = arb(h, ids)
         assert h_out.shape == (2, 4, 64)
         assert d_a.shape == (2, 4, 10)
@@ -41,7 +41,7 @@ class TestARBModule:
         arb = _build_test_arb()
         h = torch.randn(1, 4, 64)
         # "25 + 50 =" -> A=25, B=50
-        ids = torch.tensor([[25, 10, 50, 99]])
+        ids = torch.tensor([[25, 10, 50, 28]])
         _, d_a, d_b = arb(h, ids)
         # d_a should be digits of 25: [5, 2, 0, ...] (LSB first)
         assert d_a[0, 0, 0].item() == 5  # ones digit
@@ -57,7 +57,7 @@ class TestARBModule:
             gate_init_logit=-100.0,
         )
         h = torch.randn(2, 4, 64)
-        ids = torch.tensor([[25, 10, 50, 99], [30, 12, 40, 99]])
+        ids = torch.tensor([[25, 10, 50, 99], [30, 12, 40, 28]])
         h_out, _, _ = arb(h, ids)
         assert torch.allclose(h_out, h, atol=1e-6), \
             "Zero-init ARB should produce h' = h"
@@ -73,7 +73,8 @@ class TestARBModule:
             arb.inject.projection.weight.fill_(0.01)
 
         h = torch.randn(2, 4, 64, requires_grad=True)
-        ids = torch.tensor([[25, 10, 50, 99], [30, 12, 40, 99]])
+        # Use token 28 for '=' so injection mask is active
+        ids = torch.tensor([[25, 10, 50, 28], [30, 12, 40, 28]])
         h_out, _, _ = arb(h, ids)
         loss = h_out.sum()
         loss.backward()
@@ -101,8 +102,8 @@ class TestARBModule:
         h1 = torch.randn(1, 4, 64)
         h2 = torch.randn(1, 4, 64)
         h_batch = torch.cat([h1, h2], dim=0)
-        ids1 = torch.tensor([[25, 10, 50, 99]])
-        ids2 = torch.tensor([[30, 12, 40, 99]])
+        ids1 = torch.tensor([[25, 10, 50, 28]])
+        ids2 = torch.tensor([[30, 12, 40, 28]])
         ids_batch = torch.cat([ids1, ids2], dim=0)
 
         out_batch, _, _ = arb(h_batch, ids_batch)

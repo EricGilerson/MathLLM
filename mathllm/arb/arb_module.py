@@ -13,8 +13,12 @@ suppress irrelevant outputs.
 
 from __future__ import annotations
 
+import torch
 import torch.nn as nn
 from torch import Tensor
+
+# GPT-2 token ID for '='
+_EQ_TOKEN_ID = 28
 
 from mathllm.arb.stage1_extract import OperandExtractor
 from mathllm.arb.stage2_encode import RNSCircleEncoder
@@ -122,8 +126,23 @@ class ArithmeticResidualBlock(nn.Module):
         # Returns flattened circle encodings: [B, S, 5 * m * 2]
         results = self.compute(a_circle, b_circle, b_exp_circle)
 
-        # Stage 4: Inject into hidden state with residual connection
-        h_prime = self.inject(results, h)
+        # Build injection mask: only inject at '=' position and after.
+        # For inputs without '=', no injection occurs.
+        B, S = input_ids.shape
+        eq_present = (input_ids == _EQ_TOKEN_ID)  # [B, S]
+        # Find first '=' in each sequence; if none, set to S (past end)
+        has_eq = eq_present.any(dim=1)  # [B]
+        eq_pos = torch.where(
+            has_eq,
+            eq_present.long().argmax(dim=1),
+            torch.full((B,), S, device=input_ids.device),
+        )  # [B]
+        positions = torch.arange(S, device=input_ids.device).unsqueeze(0)  # [1, S]
+        inject_mask = (positions >= eq_pos.unsqueeze(1)).float()  # [B, S]
+        inject_mask = inject_mask.unsqueeze(2)  # [B, S, 1] for broadcasting
+
+        # Stage 4: Inject into hidden state, masked to answer positions only
+        h_prime = self.inject(results * inject_mask, h)
         return h_prime, d_a, d_b
 
     def count_parameters(self) -> dict[str, int]:

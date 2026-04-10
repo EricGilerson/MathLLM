@@ -11,6 +11,36 @@ sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent.par
 
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
+
+def _disable_torch_debug_noise() -> None:
+    """Disable compile/debug env flags that can flood training logs.
+
+    Some launch environments export Torch debug variables globally. Those are
+    useful for compiler debugging, but they can dump thousands of lines of FX /
+    Inductor trace output during normal training. Allow opt-out via
+    MATHLLM_KEEP_TORCH_DEBUG=1.
+    """
+    if os.environ.get("MATHLLM_KEEP_TORCH_DEBUG") == "1":
+        return
+
+    noisy_env_defaults = {
+        "TORCH_COMPILE_DEBUG": "0",
+        "TORCH_COMPILE_DEBUG_SAVE_REAL": "0",
+        "TORCHDYNAMO_VERBOSE": "0",
+        "AOT_INDUCTOR_DEBUG_COMPILE": "0",
+        "FX_GRAPH_SHOW_DEVICE": "0",
+        "FX_GRAPH_SHOW_STRIDE": "0",
+    }
+    for key, value in noisy_env_defaults.items():
+        os.environ[key] = value
+
+    # TORCH_LOGS has precedence over torch._logging.set_logs(), so clear it
+    # entirely unless the caller explicitly opts in to keeping Torch debug logs.
+    os.environ.pop("TORCH_LOGS", None)
+
+
+_disable_torch_debug_noise()
+
 import torch
 from torch.utils.data import DataLoader
 from transformers import AutoTokenizer
@@ -24,6 +54,38 @@ from mathllm.training.trainer import ARBTrainer, resolve_resume_checkpoint
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
+
+
+def _configure_torch_logging() -> None:
+    """Clamp Torch compiler logging to avoid FX/Inductor graph dumps."""
+    import logging as py_logging
+
+    if not hasattr(torch, "_logging") or not hasattr(torch._logging, "set_logs"):
+        return
+
+    torch._logging.set_logs(
+        all=py_logging.ERROR,
+        dynamo=py_logging.ERROR,
+        aot=py_logging.ERROR,
+        inductor=py_logging.ERROR,
+        graph=False,
+        graph_code=False,
+        graph_code_verbose=False,
+        graph_breaks=False,
+        graph_sizes=False,
+        guards=False,
+        recompiles=False,
+        recompiles_verbose=False,
+        trace_source=False,
+        trace_call=False,
+        trace_bytecode=False,
+        output_code=False,
+        kernel_code=False,
+        schedule=False,
+        perf_hints=False,
+        fusion=False,
+        cudagraphs=False,
+    )
 
 
 def main():
@@ -123,6 +185,7 @@ def main():
     import torch._dynamo
     torch._dynamo.config.verbose = False
     torch._dynamo.config.suppress_errors = True
+    _configure_torch_logging()
     model.to(device)
     model.prepare_for_device(device)
     if device.type == "cuda" and hasattr(torch, "compile"):

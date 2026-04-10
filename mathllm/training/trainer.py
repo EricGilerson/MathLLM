@@ -590,17 +590,10 @@ class ARBTrainer:
         num_batches = 0
         max_batches = self.config.max_eval_batches or len(self.eval_loader)
 
-        eval_bar = tqdm(
-            self.eval_loader,
-            desc="Evaluating",
-            unit="batch",
-            total=min(max_batches, len(self.eval_loader)),
-            position=2,
-            leave=False,
-        )
-
         with self._autocast_context():
-            for batch in eval_bar:
+            # Avoid a nested eval progress bar here: in captured logs and
+            # non-interactive runs, tqdm flushes a large amount of output.
+            for batch in self.eval_loader:
                 if num_batches >= max_batches:
                     break
                 batch = {key: value.to(self.device) for key, value in batch.items()}
@@ -612,7 +605,6 @@ class ARBTrainer:
                 total_loss += outputs["loss"].detach()
                 num_batches += 1
 
-        eval_bar.close()
         return (total_loss / max(num_batches, 1)).item()
 
     @torch.no_grad()

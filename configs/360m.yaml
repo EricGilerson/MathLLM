@@ -39,7 +39,7 @@ training:
   warmup_steps: 50
   grad_clip: 1.0
   log_every: 10
-  eval_every: 200
+  eval_every: 0
   checkpoint_dir: "checkpoints_360m/"
   final_model_dir: "trained_model_360m/"
   auto_resume_latest: true

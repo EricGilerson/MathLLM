@@ -208,13 +208,16 @@ class ARBTrainer:
     # ------------------------------------------------------------------
 
     def _autocast_context(self):
-        """Return an autocast context when the device supports it."""
-        use_autocast = self.device.type in {"mps", "cuda"}
-        if not use_autocast:
-            return contextlib.nullcontext()
+        """Return an autocast context when the device supports it.
 
-        dtype = torch.float16 if self.device.type == "mps" else torch.bfloat16
-        return torch.autocast(device_type=self.device.type, dtype=dtype)
+        MPS float16 autocast is disabled: autocast casts linear outputs to
+        float16 but doesn't protect elementwise ops (e.g. SwiGLU's
+        silu(gate) * up), causing overflow/NaN on larger models.
+        Running float32 on MPS is fast enough for models up to ~1B.
+        """
+        if self.device.type == "cuda":
+            return torch.autocast(device_type="cuda", dtype=torch.bfloat16)
+        return contextlib.nullcontext()
 
     def _clone_loader(
         self,

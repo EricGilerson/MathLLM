@@ -98,7 +98,7 @@ class TransformerWithARB(nn.Module):
             base_model = AutoModelForCausalLM.from_pretrained(
                 config.training.base_model,
                 attn_implementation="eager",
-                dtype=torch.float16,
+                torch_dtype=torch.float32,
             )
 
         # Force eager attention for reproducibility

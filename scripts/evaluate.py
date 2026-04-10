@@ -60,6 +60,10 @@ def main():
             ckpt = torch.load(args.checkpoint, map_location=device, weights_only=False)
             for key, state in ckpt["arb_state"].items():
                 model.arbs[key].load_state_dict(state, strict=False)
+            if "lora_state" in ckpt and model.lora_head is not None:
+                model.lora_head.load_state_dict(ckpt["lora_state"])
+            if "lora_layers_state" in ckpt and model.lora_layers is not None:
+                model.lora_layers.load_state_dict(ckpt["lora_layers_state"])
 
         model.to(device)
 

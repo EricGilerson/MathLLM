@@ -468,6 +468,28 @@ class ARBEvaluator:
         self.model.lora_head.lora_A.data.copy_(saved["lora_A"])
         self.model.lora_head.lora_B.data.copy_(saved["lora_B"])
 
+    def _zero_layer_lora(self) -> dict | None:
+        """Zero all layer LoRA parameters and return saved state."""
+        if not hasattr(self.model, "lora_layers") or self.model.lora_layers is None:
+            return None
+        saved = {}
+        for key, lora_module in self.model.lora_layers.items():
+            saved[key] = {
+                "lora_A": lora_module.lora_A.data.clone(),
+                "lora_B": lora_module.lora_B.data.clone(),
+            }
+            lora_module.lora_A.data.zero_()
+            lora_module.lora_B.data.zero_()
+        return saved
+
+    def _restore_layer_lora(self, saved: dict | None) -> None:
+        """Restore layer LoRA weights from saved state."""
+        if saved is None or self.model.lora_layers is None:
+            return
+        for key, lora_module in self.model.lora_layers.items():
+            lora_module.lora_A.data.copy_(saved[key]["lora_A"])
+            lora_module.lora_B.data.copy_(saved[key]["lora_B"])
+
     def _run_accuracy_test(
         self, num_samples: int, rng, pure_arithmetic: bool = False
     ) -> int:
@@ -550,21 +572,25 @@ class ARBEvaluator:
         logger.info(f"  LoRA only: {results['lora_only']:.1%}")
         self._restore_injection(saved_arb)
 
-        # 3. ARB only (zero LoRA)
+        # 3. ARB only (zero head LoRA + layer LoRA)
         saved_lora = self._zero_lora()
+        saved_layer_lora = self._zero_layer_lora()
         rng = random.Random(seed)
         arb_only_correct = self._run_accuracy_test(num_samples, rng, pure_arithmetic)
         results["arb_only"] = arb_only_correct / num_samples
         logger.info(f"  ARB only: {results['arb_only']:.1%}")
+        self._restore_layer_lora(saved_layer_lora)
         self._restore_lora(saved_lora)
 
-        # 4. Baseline (zero both)
+        # 4. Baseline (zero all: ARB injection + head LoRA + layer LoRA)
         saved_arb = self._zero_injection()
         saved_lora = self._zero_lora()
+        saved_layer_lora = self._zero_layer_lora()
         rng = random.Random(seed)
         baseline_correct = self._run_accuracy_test(num_samples, rng, pure_arithmetic)
         results["baseline"] = baseline_correct / num_samples
         logger.info(f"  Baseline: {results['baseline']:.1%}")
+        self._restore_layer_lora(saved_layer_lora)
         self._restore_lora(saved_lora)
         self._restore_injection(saved_arb)
 

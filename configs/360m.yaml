@@ -3,7 +3,7 @@ rns:
   num_digit_slots: 6  # handles up to 999,999 (covers 999*999=998,001)
 
 arb:
-  layer_positions: [31]  # last layer of 32
+  layer_positions: [24, 31]  # dual ARBs: mid-network + last layer
   softmax_temperature: 1000.0
   num_results: 5
   dropout: 0.0
@@ -15,49 +15,55 @@ arb:
   extraction_attn_rank: 32
   injection_pos_dim: 16
   injection_mlp_hidden: 128
-  lora_rank: 8
-  lora_alpha: 8.0
+  # LM head LoRA (increased rank for digit-to-token mapping)
+  lora_rank: 32
+  lora_alpha: 32.0
+  # Layer LoRA on final transformer layers
+  lora_layer_positions: [28, 29, 30, 31]
+  lora_layer_rank: 16
+  lora_layer_alpha: 16.0
+  lora_layer_modules: ["self_attn.q_proj", "self_attn.v_proj", "mlp.down_proj"]
 
 data:
-  num_positive: 50000
+  num_positive: 100000
   num_negative: 0
   num_edge_cases: 0
   max_digits: 3
-  max_value: 999  # true 3-digit operands
-  max_result: 999999  # allow 6-digit results (999*999=998001)
+  max_value: 999
+  max_result: 999999
   seed: 42
-  output_dir: "data_360m/"
+  output_dir: "data_360m_v2/"
   pure_arithmetic: true
 
 training:
   base_model: "HuggingFaceTB/SmolLM2-360M"
-  lr: 1.0e-3
+  lr: 5.0e-4
   weight_decay: 0.01
-  batch_size: 32
-  max_epochs: 30
+  batch_size: 64
+  max_epochs: 200
   checkpoint_every_steps: 0
-  max_seq_len: 64  # longer for 6-digit answers (e.g. "999*999=998001")
-  warmup_steps: 50
+  max_seq_len: 64
+  warmup_steps: 100
   grad_clip: 1.0
   log_every: 10
-  eval_every: 0
-  checkpoint_dir: "checkpoints_360m/"
-  final_model_dir: "trained_model_360m/"
+  eval_every: 200
+  checkpoint_dir: "checkpoints_360m_v2/"
+  final_model_dir: "trained_model_360m_v2/"
   auto_resume_latest: true
   device: "auto"
   answer_only_loss: true
   early_stopping_patience: 8
-  max_eval_batches: 5
+  max_eval_batches: 20
   eval_batch_size: 128
   phase1_epochs: 0
-  phase2_epochs: 20
-  phase3_epochs: 10
+  phase2_epochs: 50
+  phase3_epochs: 50
   aux_loss_weight: 1.0
   aux_loss_decay: 0.1
   phase1_aux_only: true
   curriculum_schedule: []
 
 evaluation:
-  num_samples_per_config: 100
+  num_samples_per_config: 200
   max_digits_range: [1, 3]
   max_new_tokens: 15

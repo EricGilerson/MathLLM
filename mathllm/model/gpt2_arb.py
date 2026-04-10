@@ -74,6 +74,21 @@ def _get_hidden_dim(model: PreTrainedModel, arch: ModelArch) -> int:
     return cfg.hidden_size
 
 
+def _get_submodule(module: nn.Module, path: str) -> nn.Module:
+    """Get a nested sub-module by dotted path (e.g., 'self_attn.q_proj')."""
+    for part in path.split("."):
+        module = getattr(module, part)
+    return module
+
+
+def _set_submodule(module: nn.Module, path: str, value: nn.Module) -> None:
+    """Set a nested sub-module by dotted path."""
+    parts = path.split(".")
+    for part in parts[:-1]:
+        module = getattr(module, part)
+    setattr(module, parts[-1], value)
+
+
 class TransformerWithARB(nn.Module):
     """Transformer augmented with Arithmetic Residual Blocks.
 
@@ -164,6 +179,47 @@ class TransformerWithARB(nn.Module):
             )
         else:
             self.lora_head = None
+
+        # LoRA adapters on transformer layers (optional)
+        lora_layer_positions = getattr(config.arb, "lora_layer_positions", ())
+        if lora_layer_positions:
+            if self.arch == ModelArch.GPT2:
+                raise ValueError(
+                    "Layer LoRA is not supported for GPT-2 (uses Conv1D). "
+                    "Use a LLaMA-style model (SmolLM2, LLaMA, Mistral, etc.)."
+                )
+            lora_layer_rank = getattr(config.arb, "lora_layer_rank", 8)
+            lora_layer_alpha = getattr(config.arb, "lora_layer_alpha", 1.0)
+            lora_layer_modules = getattr(
+                config.arb, "lora_layer_modules",
+                ("self_attn.q_proj", "self_attn.v_proj"),
+            )
+
+            self.lora_layers = nn.ModuleDict()
+            inner_model = self.base_model.model
+            for layer_idx in lora_layer_positions:
+                layer = inner_model.layers[layer_idx]
+                for module_name in lora_layer_modules:
+                    target = _get_submodule(layer, module_name)
+                    lora_wrapped = LoRALinear(
+                        target, rank=lora_layer_rank, alpha=lora_layer_alpha
+                    )
+                    _set_submodule(layer, module_name, lora_wrapped)
+                    key = f"layer_{layer_idx}_{module_name.replace('.', '_')}"
+                    self.lora_layers[key] = lora_wrapped
+
+            total_lora_layer_params = sum(
+                p.numel() for p in self.lora_layers.parameters()
+                if p.requires_grad
+            )
+            logger.info(
+                "Layer LoRA created: %d layers x %d modules, rank=%d, "
+                "alpha=%.1f, params=%d",
+                len(lora_layer_positions), len(lora_layer_modules),
+                lora_layer_rank, lora_layer_alpha, total_lora_layer_params,
+            )
+        else:
+            self.lora_layers = None
 
     def _setup_gpt2(self) -> None:
         """GPT-2-specific forward pass setup."""
@@ -628,6 +684,8 @@ class TransformerWithARB(nn.Module):
             params.extend(p for p in arb.parameters() if p.requires_grad)
         if self.lora_head is not None:
             params.extend(p for p in self.lora_head.parameters() if p.requires_grad)
+        if self.lora_layers is not None:
+            params.extend(p for p in self.lora_layers.parameters() if p.requires_grad)
         return params
 
     def save_exported_model(
@@ -672,6 +730,8 @@ class TransformerWithARB(nn.Module):
         eq_token_id = eq_ids[0] if eq_ids else 28
 
         model = cls(config, base_model=base_model, eq_token_id=eq_token_id)
+        if hasattr(model, "arbs") and len(model.arbs) > 0:
+            model.build_token_digit_tables(tokenizer)
         state_dict = torch.load(
             output_dir / EXPORT_STATE_FILENAME,
             map_location="cpu",

@@ -31,6 +31,10 @@ class ARBConfig:
     injection_mlp_hidden: int = 0  # MLP hidden dim for injection (0 = linear)
     lora_rank: int = 0  # LoRA rank for LM head (0 = disabled)
     lora_alpha: float = 1.0  # LoRA scaling factor
+    lora_layer_positions: tuple[int, ...] = ()  # Transformer layer indices to LoRA-adapt (empty = disabled)
+    lora_layer_rank: int = 8  # LoRA rank for transformer layer adapters
+    lora_layer_alpha: float = 1.0  # LoRA scaling for layer adapters
+    lora_layer_modules: tuple[str, ...] = ("self_attn.q_proj", "self_attn.v_proj")  # Sub-modules to adapt
     inject_after_norm: bool = True  # Inject after final norm to avoid signal dilution
 
 

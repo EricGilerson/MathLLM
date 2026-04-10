@@ -17,12 +17,43 @@ class FakeTokenizer:
     def __init__(self):
         self.pad_token = None
         self.eos_token = "<eos>"
+        self.vocab_size = 64
 
     def encode(self, text, add_special_tokens=True):
         """Stub encode that returns token 28 for '='."""
         if text == "=":
             return [28]
+        if text == "+":
+            return [10]
+        if text == "-":
+            return [11]
+        if text == "*":
+            return [12]
+        if text == "/":
+            return [13]
+        if text == "^":
+            return [14]
+        if text == "300":
+            return [30]
         return [0]
+
+    def decode(self, token_ids):
+        token_id = token_ids[0]
+        if 0 <= token_id <= 9:
+            return str(token_id)
+        if token_id == 10:
+            return "+"
+        if token_id == 11:
+            return "-"
+        if token_id == 12:
+            return "*"
+        if token_id == 13:
+            return "/"
+        if token_id == 14:
+            return "^"
+        if token_id == 30:
+            return "300"
+        return "?"
 
     def save_pretrained(self, output_dir: str | Path) -> None:
         output_dir = Path(output_dir)
@@ -118,3 +149,31 @@ class TestModelExport:
             model.state_dict()["extra.bias"],
             reloaded_model.state_dict()["extra.bias"],
         )
+
+    def test_transformer_round_trip_rebuilds_token_buffers(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(gpt2_arb, "AutoTokenizer", FakeTokenizer)
+        monkeypatch.setattr(gpt2_arb, "AutoConfig", FakeBaseModelConfig)
+        monkeypatch.setattr(gpt2_arb, "AutoModelForCausalLM", FakeBaseModel)
+
+        config = Config()
+        config.training.base_model = "gpt2"
+        config.arb.lora_rank = 0
+        model = gpt2_arb.TransformerWithARB(config, base_model=FakeBaseModel())
+        tokenizer = FakeTokenizer()
+        model.build_token_digit_tables(tokenizer)
+
+        export_dir = model.save_exported_model(tmp_path / "bundle_real", tokenizer)
+        reloaded_model, reloaded_tokenizer, _ = gpt2_arb.TransformerWithARB.from_exported_model(
+            export_dir
+        )
+
+        assert isinstance(reloaded_tokenizer, FakeTokenizer)
+        for key in model.arbs.keys():
+            torch.testing.assert_close(
+                model.arbs[key].extract.token_digit_value,
+                reloaded_model.arbs[key].extract.token_digit_value,
+            )
+            torch.testing.assert_close(
+                model.arbs[key].extract.is_operator,
+                reloaded_model.arbs[key].extract.is_operator,
+            )

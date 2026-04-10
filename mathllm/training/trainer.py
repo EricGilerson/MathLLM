@@ -664,6 +664,8 @@ class ARBTrainer:
         # Save LoRA state if active
         if hasattr(self.model, "lora_head") and self.model.lora_head is not None:
             payload["lora_state"] = self.model.lora_head.state_dict()
+        if hasattr(self.model, "lora_layers") and self.model.lora_layers is not None:
+            payload["lora_layers_state"] = self.model.lora_layers.state_dict()
         return payload
 
     def _save_checkpoint(self, name: str) -> None:
@@ -689,6 +691,8 @@ class ARBTrainer:
         # Restore LoRA state if present
         if "lora_state" in ckpt and hasattr(self.model, "lora_head") and self.model.lora_head is not None:
             self.model.lora_head.load_state_dict(ckpt["lora_state"])
+        if "lora_layers_state" in ckpt and hasattr(self.model, "lora_layers") and self.model.lora_layers is not None:
+            self.model.lora_layers.load_state_dict(ckpt["lora_layers_state"])
 
         self.global_step = ckpt["global_step"]
         saved_steps_per_epoch = ckpt.get("steps_per_epoch", self.steps_per_epoch)

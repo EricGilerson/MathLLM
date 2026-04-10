@@ -58,12 +58,13 @@ logger = logging.getLogger(__name__)
 
 def _configure_torch_logging() -> None:
     """Clamp Torch compiler logging to avoid FX/Inductor graph dumps."""
+    import inspect
     import logging as py_logging
 
     if not hasattr(torch, "_logging") or not hasattr(torch._logging, "set_logs"):
         return
 
-    torch._logging.set_logs(
+    kwargs = dict(
         all=py_logging.ERROR,
         dynamo=py_logging.ERROR,
         aot=py_logging.ERROR,
@@ -86,6 +87,20 @@ def _configure_torch_logging() -> None:
         fusion=False,
         cudagraphs=False,
     )
+    try:
+        supported = inspect.signature(torch._logging.set_logs).parameters
+        kwargs = {key: value for key, value in kwargs.items() if key in supported}
+    except (TypeError, ValueError):
+        # Fall back to the smallest broadly-supported subset if signature
+        # introspection is unavailable.
+        kwargs = {
+            "all": py_logging.ERROR,
+            "dynamo": py_logging.ERROR,
+            "aot": py_logging.ERROR,
+            "inductor": py_logging.ERROR,
+        }
+
+    torch._logging.set_logs(**kwargs)
 
 
 def main():

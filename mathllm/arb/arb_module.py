@@ -171,6 +171,10 @@ class ArithmeticResidualBlock(nn.Module):
         d_b = torch.zeros(B, 1, K, device=device)
         return h_prime, d_a, d_b
 
+    def prepare_for_device(self, device: torch.device | str) -> None:
+        """Warm runtime-only frozen buffers after the module is moved."""
+        self.compute.prepare_for_device(device)
+
     def _decode_to_digits(
         self,
         a_circle: Tensor,

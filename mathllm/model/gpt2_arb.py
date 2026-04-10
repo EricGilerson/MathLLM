@@ -209,6 +209,11 @@ class TransformerWithARB(nn.Module):
             tokenizer.vocab_size,
         )
 
+    def prepare_for_device(self, device: torch.device | str) -> None:
+        """Warm runtime-only buffers that are not registered module state."""
+        for arb in self.arbs.values():
+            arb.prepare_for_device(device)
+
     # ------------------------------------------------------------------
     # Forward pass
     # ------------------------------------------------------------------
@@ -527,11 +532,11 @@ class TransformerWithARB(nn.Module):
         flat_logits = shift_logits.view(-1, shift_logits.size(-1))
         flat_labels = shift_labels.view(-1)
         valid_count = flat_labels.ne(-100).sum()
-        if valid_count.item() == 0:
-            return flat_logits.new_zeros(())
-        return F.cross_entropy(
+        loss = F.cross_entropy(
             flat_logits.float(), flat_labels, ignore_index=-100, reduction="sum",
-        ) / valid_count
+        )
+        valid_count = valid_count.to(device=loss.device, dtype=loss.dtype)
+        return loss / valid_count.clamp_min(1.0) * valid_count.gt(0).to(loss.dtype)
 
     @torch.no_grad()
     def generate(

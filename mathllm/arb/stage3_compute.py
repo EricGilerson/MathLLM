@@ -137,6 +137,12 @@ class ArithmeticCompute(nn.Module):
             self._crt_weights_fp64_cache[cache_key] = weights
         return weights
 
+    def prepare_for_device(self, device: torch.device | str) -> None:
+        """Materialize runtime-only buffers needed on the target device."""
+        device = torch.device(device)
+        if device.type == "cuda":
+            self._get_crt_weights_fp64(device)
+
     # ------------------------------------------------------------------
     # Addition: complex multiplication of circle encodings
     # ------------------------------------------------------------------

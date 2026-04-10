@@ -361,6 +361,8 @@ class ARBTrainer:
             raise ValueError("steps_to_run must be positive")
 
         self.model.to(self.device)
+        if hasattr(self.model, "prepare_for_device"):
+            self.model.prepare_for_device(self.device)
         history: dict[str, list[float]] = {
             "train_loss": [],
             "eval_loss": [],

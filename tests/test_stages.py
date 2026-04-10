@@ -71,6 +71,27 @@ class TestOperandExtractor:
         assert d_b[0, 0, 0].item() == 0
         assert d_b[0, 0, 1].item() == 5
 
+    def test_per_digit_extraction_is_lsb_first(self):
+        ext = OperandExtractor(hidden_dim=64, num_digits=4)
+        ext._per_digit = True
+        ext.token_digit_value = torch.full((32,), -1, dtype=torch.long)
+        for token_id, digit in enumerate(range(10)):
+            ext.token_digit_value[token_id] = digit
+        ext.is_operator = torch.zeros(32, dtype=torch.bool)
+        ext.is_operator[10] = True
+
+        h = torch.randn(2, 6, 64)
+        input_ids = torch.tensor([
+            [1, 2, 10, 3, 4, 28],   # 12 + 34
+            [9, 10, 8, 28, 0, 0],   # 9 + 8, stop at '='
+        ])
+        d_a, d_b, _, _ = ext(h, input_ids)
+
+        assert torch.equal(d_a[0, 0], torch.tensor([2.0, 1.0, 0.0, 0.0]))
+        assert torch.equal(d_b[0, 0], torch.tensor([4.0, 3.0, 0.0, 0.0]))
+        assert torch.equal(d_a[1, 0], torch.tensor([9.0, 0.0, 0.0, 0.0]))
+        assert torch.equal(d_b[1, 0], torch.tensor([8.0, 0.0, 0.0, 0.0]))
+
 
 class TestRNSCircleEncoder:
     def test_output_shape(self):

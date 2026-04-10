@@ -154,38 +154,43 @@ class OperandExtractor(nn.Module):
         # Get digit values for each token: [B, S], -1 for non-digits
         ids_clamped = input_ids.clamp(0, self.token_digit_value.size(0) - 1)
         dv = self.token_digit_value[ids_clamped]  # [B, S]
+        digit_mask = dv >= 0
+        positions = torch.arange(S, device=device).unsqueeze(0).expand(B, -1)
+        digit_offsets = torch.arange(K, device=device).unsqueeze(0).expand(B, -1)
 
-        d_a = torch.zeros(B, K, device=device)
-        d_b = torch.zeros(B, K, device=device)
+        # Operand A is the contiguous run of digit tokens immediately before the operator.
+        invalid_before = (~digit_mask) & (positions < op_pos.unsqueeze(1))
+        last_invalid_before = torch.where(
+            invalid_before,
+            positions + 1,
+            torch.zeros_like(positions),
+        ).amax(dim=1)
+        a_start = last_invalid_before
+        a_positions = op_pos.unsqueeze(1) - 1 - digit_offsets
+        a_in_range = a_positions >= a_start.unsqueeze(1)
+        a_indices = a_positions.clamp(0, S - 1)
+        d_a = torch.where(
+            a_in_range,
+            dv.gather(1, a_indices),
+            torch.zeros(B, K, device=device, dtype=dv.dtype),
+        ).to(dtype=torch.float32)
 
-        # Process each batch element
-        # (vectorized would be complex; batch sizes are small enough)
-        for b in range(B):
-            op = op_pos[b].item()
-
-            # Operand A: digit tokens from 0..op-1 (MSB first in text order)
-            a_digits = []
-            for i in range(op - 1, -1, -1):
-                v = dv[b, i].item()
-                if v < 0:
-                    break
-                a_digits.append(v)
-            # a_digits is now LSB-first (we walked right to left)
-            for i, v in enumerate(a_digits):
-                if i < K:
-                    d_a[b, i] = v
-
-            # Operand B: digit tokens from op+1..end (MSB first in text order)
-            b_digits_msb = []
-            for i in range(op + 1, S):
-                v = dv[b, i].item()
-                if v < 0:
-                    break
-                b_digits_msb.append(v)
-            # Reverse to LSB-first
-            for i, v in enumerate(reversed(b_digits_msb)):
-                if i < K:
-                    d_b[b, i] = v
+        # Operand B is the contiguous run of digit tokens immediately after the operator.
+        invalid_after = (~digit_mask) & (positions > op_pos.unsqueeze(1))
+        first_invalid_after = torch.where(
+            invalid_after,
+            positions,
+            torch.full_like(positions, S),
+        ).amin(dim=1)
+        b_end = first_invalid_after - 1
+        b_positions = b_end.unsqueeze(1) - digit_offsets
+        b_in_range = b_positions > op_pos.unsqueeze(1)
+        b_indices = b_positions.clamp(0, S - 1)
+        d_b = torch.where(
+            b_in_range,
+            dv.gather(1, b_indices),
+            torch.zeros(B, K, device=device, dtype=dv.dtype),
+        ).to(dtype=torch.float32)
 
         return d_a, d_b
 

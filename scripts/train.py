@@ -3,10 +3,13 @@
 
 import argparse
 import logging
+import os
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent.parent))
+
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
 import torch
 from torch.utils.data import DataLoader
@@ -120,7 +123,11 @@ def main():
     import torch._dynamo
     torch._dynamo.config.verbose = False
     torch._dynamo.config.suppress_errors = True
+    model.to(device)
+    model.prepare_for_device(device)
     if device.type == "cuda" and hasattr(torch, "compile"):
+        if hasattr(torch, "set_float32_matmul_precision"):
+            torch.set_float32_matmul_precision("high")
         logger.info("Compiling model forward pass with torch.compile...")
         model.forward = torch.compile(model.forward, mode="reduce-overhead")
 

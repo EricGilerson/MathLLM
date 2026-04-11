@@ -24,7 +24,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 logger = logging.getLogger(__name__)
 
 _PROMPT_PATTERN = re.compile(
-    r"^\s*(-?\d+)\s*(\+|-|\*|\*\*|/)\s*(-?\d+)\s*=\s*$"
+    r"^\s*(-?\d+)\s*(\+|-|\*|\*\*|/|\^)\s*(-?\d+)\s*=\s*$"
 )
 
 
@@ -56,7 +56,7 @@ def compute_expected(prompt: str) -> int | None:
         return a - b
     if op == "*":
         return a * b
-    if op == "**":
+    if op in ("**", "^"):
         try:
             result = a**b
         except (OverflowError, ValueError):

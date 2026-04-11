@@ -107,6 +107,13 @@ class OperandExtractor(nn.Module):
             op_ids = tokenizer.encode(op_char, add_special_tokens=False)
             if len(op_ids) == 1:
                 is_op[op_ids[0]] = True
+            else:
+                import logging
+                logging.getLogger(__name__).warning(
+                    "Operator '%s' encodes to %d tokens (expected 1); "
+                    "extraction may not detect this operator.",
+                    op_char, len(op_ids),
+                )
 
         self.token_digit_value = digit_val
         self.is_operator = is_op

@@ -66,6 +66,7 @@ configs/
 scripts/
 ├── generate_data.py        # Generate synthetic arithmetic dataset
 ├── train.py                # Run training
+├── export_checkpoint.py    # Export a final bundle from the latest checkpoint
 ├── infer.py                # Run direct prompts against exported bundles
 └── evaluate.py             # Evaluate model accuracy
 ```
@@ -93,6 +94,9 @@ python scripts/train.py --config configs/default.yaml --steps-to-run 1000
 
 # Training also exports a standalone final model bundle
 # to trained_model/ by default, or a custom path via --export-dir
+
+# If you stop training early, export the latest checkpoint anyway
+python scripts/export_checkpoint.py --config configs/default.yaml
 
 # Evaluate
 python scripts/evaluate.py --config configs/default.yaml
@@ -157,6 +161,7 @@ Checkpointing and resume behavior:
 Final model export:
 
 - Every training run exports the in-memory final model to `training.final_model_dir`.
+- If training stops early, `python scripts/export_checkpoint.py --config ...` rebuilds a full export bundle from the latest or an explicit checkpoint.
 - The export bundle includes `model_state.pt`, `config.yaml`, tokenizer files, and the saved GPT-2 architecture config in `base_model_config/`.
 - Override the destination with `--export-dir PATH`.
 - Load the bundle with `python scripts/evaluate.py --model-dir trained_model/`.

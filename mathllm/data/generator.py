@@ -16,6 +16,7 @@ evaluations and Newton-Raphson iterations across multiple ARB layers.
 from __future__ import annotations
 
 import json
+import logging
 import math
 import random
 from dataclasses import asdict, dataclass
@@ -23,6 +24,8 @@ from pathlib import Path
 from typing import Any
 
 from mathllm.config import DataConfig
+
+logger = logging.getLogger(__name__)
 from mathllm.data.negative_examples import NegativeExampleSampler
 from mathllm.data.templates import (
     ADDITION_TEMPLATES,
@@ -612,15 +615,56 @@ class ArithmeticDataGenerator:
 
     def _generate_pure_example(self) -> ArithmeticRecord | None:
         """Generate one pure arithmetic example (A op B = C)."""
-        op = self.rng.choice(["add", "sub", "mul", "exp", "div"])
+        op = self.rng.choice(["add", "sub", "mul", "div"])
         generators = {
             "add": self._generate_pure_addition,
             "sub": self._generate_pure_subtraction,
             "mul": self._generate_pure_multiplication,
-            "exp": self._generate_pure_exponentiation,
             "div": self._generate_pure_division,
         }
         return generators[op]()
+
+    # ------------------------------------------------------------------
+    # Language retention data
+    # ------------------------------------------------------------------
+
+    def _load_retention_examples(self) -> list[ArithmeticRecord]:
+        """Load language retention examples from an external text file.
+
+        Supports plain text (one example per line) and JSONL ({"text": "..."}).
+        Returns empty list if no retention path is configured.
+        """
+        path = self.config.retention_data_path
+        if not path:
+            return []
+
+        file_path = Path(path)
+        if not file_path.exists():
+            logger.warning("Retention data file not found: %s", path)
+            return []
+
+        records: list[ArithmeticRecord] = []
+        with open(file_path) as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                if line.startswith("{"):
+                    try:
+                        data = json.loads(line)
+                        text = data.get("text", line)
+                    except json.JSONDecodeError:
+                        text = line
+                else:
+                    text = line
+                records.append(ArithmeticRecord(text=text, op_type="retention"))
+
+        count = self.config.retention_count
+        if count > 0 and len(records) > count:
+            records = self.rng.sample(records, count)
+
+        logger.info("Loaded %d retention examples from %s", len(records), path)
+        return records
 
     # ------------------------------------------------------------------
     # Top-level generation
@@ -669,6 +713,7 @@ class ArithmeticDataGenerator:
                 if ex is not None:
                     examples.append(ex)
                 attempts += 1
+            examples.extend(self._load_retention_examples())
             self.rng.shuffle(examples)
             return examples
 
@@ -689,6 +734,9 @@ class ArithmeticDataGenerator:
         # Edge cases
         for _ in range(self.config.num_edge_cases):
             examples.append(self._generate_edge_case())
+
+        # Language retention
+        examples.extend(self._load_retention_examples())
 
         self.rng.shuffle(examples)
         return examples

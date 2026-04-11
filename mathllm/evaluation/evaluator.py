@@ -28,7 +28,7 @@ from mathllm.model.gpt2_arb import GPT2WithARB
 
 logger = logging.getLogger(__name__)
 
-OP_SYMBOLS = {"add": "+", "sub": "-", "mul": "*", "exp": "**", "div": "/"}
+OP_SYMBOLS = {"add": "+", "sub": "-", "mul": "*", "exp": "^", "div": "/"}
 
 
 def _compute_expected(op: str, a: int, b: int) -> int | None:
@@ -173,7 +173,7 @@ class ARBEvaluator:
             expected = _compute_expected("exp", a, b)
             if expected is None:
                 continue
-            prompt = f"{a} ** {b} ="
+            prompt = f"{a}^{b}="
             generated = self._generate_text(
                 prompt, max_new_tokens=len(str(expected)) + 5
             )

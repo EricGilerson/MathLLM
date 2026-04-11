@@ -165,6 +165,10 @@ class TransformerWithARB(nn.Module):
                 injection_mlp_hidden=config.arb.injection_mlp_hidden,
             )
 
+        # Generation-mode LoRA gate cache
+        self._generation_mode = False
+        self._cached_lora_gate: Tensor | None = None
+
         # LoRA adapter on LM head (optional)
         lora_rank = getattr(config.arb, "lora_rank", 0)
         if lora_rank > 0:
@@ -269,6 +273,41 @@ class TransformerWithARB(nn.Module):
         """Warm runtime-only buffers that are not registered module state."""
         for arb in self.arbs.values():
             arb.prepare_for_device(device)
+
+    def _compute_lora_gate(self, input_ids: Tensor) -> Tensor | None:
+        """Compute per-position LoRA gate based on '=' token position.
+
+        Returns [B, S, 1] float tensor: 1.0 at positions >= '=' token,
+        0.0 before it. This matches the ARB's inject_mask so the LoRA
+        is only active where ARB results are injected.
+
+        During generation step 2+, returns cached [B, 1, 1] gate
+        (1.0 if prompt had '=', 0.0 otherwise).
+        """
+        if self.lora_head is None:
+            return None
+
+        # Use cached gate during generation step 2+
+        if self._generation_mode and self._cached_lora_gate is not None:
+            return self._cached_lora_gate
+
+        B, S = input_ids.shape
+        device = input_ids.device
+        eq_present = (input_ids == self._eq_token_id)  # [B, S]
+        has_eq = eq_present.any(dim=1)  # [B]
+        eq_pos = torch.where(
+            has_eq,
+            eq_present.long().argmax(dim=1),
+            torch.full((B,), S, device=device),
+        )  # [B]
+        positions = torch.arange(S, device=device).unsqueeze(0)  # [1, S]
+        gate = (positions >= eq_pos.unsqueeze(1)).float().unsqueeze(2)  # [B, S, 1]
+
+        # Cache per-sequence gate for generation step 2+
+        if self._generation_mode:
+            self._cached_lora_gate = has_eq.float().view(-1, 1, 1)
+
+        return gate
 
     # ------------------------------------------------------------------
     # Forward pass
@@ -394,9 +433,10 @@ class TransformerWithARB(nn.Module):
             )
             arb_extractions[last_arb_pos] = (d_a, d_b)
 
-        # LM head (with optional LoRA)
+        # LM head (with optional LoRA, gated by arithmetic detection)
+        lora_gate = self._compute_lora_gate(input_ids)
         if self.lora_head is not None:
-            logits = self.lora_head(hidden_states)
+            logits = self.lora_head(hidden_states, gate=lora_gate)
         else:
             logits = self.base_model.lm_head(hidden_states)
 
@@ -508,9 +548,10 @@ class TransformerWithARB(nn.Module):
             )
             arb_extractions[last_arb_pos] = (d_a, d_b)
 
-        # LM head (with optional LoRA)
+        # LM head (with optional LoRA, gated by arithmetic detection)
+        lora_gate = self._compute_lora_gate(input_ids)
         if self.lora_head is not None:
-            logits = self.lora_head(hidden_states)
+            logits = self.lora_head(hidden_states, gate=lora_gate)
         else:
             logits = self.base_model.lm_head(hidden_states)
 
@@ -627,6 +668,10 @@ class TransformerWithARB(nn.Module):
         for arb in self.arbs.values():
             arb.enter_generation_mode()
 
+        # Reset LoRA gate cache for generation
+        self._generation_mode = True
+        self._cached_lora_gate = None
+
         try:
             for _ in range(max_new_tokens):
                 cache_len = cache.get_seq_length() if cache else 0
@@ -674,6 +719,8 @@ class TransformerWithARB(nn.Module):
             # Always exit generation mode to clean up cached state
             for arb in self.arbs.values():
                 arb.exit_generation_mode()
+            self._generation_mode = False
+            self._cached_lora_gate = None
 
         return generated
 

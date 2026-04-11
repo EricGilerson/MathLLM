@@ -29,8 +29,6 @@ data:
   seed: 42
   output_dir: "data_360m/"
   pure_arithmetic: true
-  retention_data_path: "data/retention.txt"
-  retention_count: 50000
 
 training:
   base_model: "HuggingFaceTB/SmolLM2-360M"

@@ -57,6 +57,7 @@ class ArithmeticResidualBlock(nn.Module):
         # Generation cache state (used to fix KV cache bug)
         self._generation_mode = False
         self._cached_results: Tensor | None = None
+        self._cached_has_eq: Tensor | None = None
         self._generation_offset = 0
         self.hidden_dim = hidden_dim
         self.num_digits = num_digits
@@ -132,12 +133,14 @@ class ArithmeticResidualBlock(nn.Module):
         """
         self._generation_mode = True
         self._cached_results = None
+        self._cached_has_eq = None
         self._generation_offset = 0
 
     def exit_generation_mode(self) -> None:
         """Disable generation cache mode and clear cached state."""
         self._generation_mode = False
         self._cached_results = None
+        self._cached_has_eq = None
         self._generation_offset = 0
 
     def _forward_generation_cached(self, h: Tensor) -> tuple[Tensor, Tensor, Tensor]:
@@ -165,6 +168,11 @@ class ArithmeticResidualBlock(nn.Module):
 
         # Inject into hidden state
         h_prime = self.inject(results, h)
+
+        # Apply cached sequence-level gate (suppress for non-arithmetic prompts)
+        if self._cached_has_eq is not None:
+            seq_gate = self._cached_has_eq.float().view(B, 1, 1)
+            h_prime = h + (h_prime - h) * seq_gate
 
         # Dummy extractions (not used during generation)
         d_a = torch.zeros(B, 1, K, device=device)
@@ -283,11 +291,17 @@ class ArithmeticResidualBlock(nn.Module):
         # Stage 4: Inject decoded digits into hidden state
         h_prime = self.inject(masked_results, h)
 
+        # Zero out entire injection delta for non-arithmetic sequences
+        # (prevents MLP bias leakage when results are all zeros)
+        seq_gate = has_eq.float().view(B, 1, 1)
+        h_prime = h + (h_prime - h) * seq_gate
+
         # Cache results for generation mode (step 2+ will reuse)
         if self._generation_mode and self._cached_results is None:
             # Cache the unmasked digit results (position-independent, same at all positions)
             # Take the first position's results since they're broadcast-identical
             self._cached_results = results[:, 0, :].clone()
+            self._cached_has_eq = has_eq.clone()
             # Next generation step will be at offset 1 from '='
             self._generation_offset = 1
 

@@ -1,5 +1,5 @@
 rns:
-  primes: [7, 11, 13, 17, 19, 23, 29, 31, 37]
+  primes: [7, 11, 13, 17, 19, 23]
   num_digit_slots: 6  # handles up to 999,999 (covers 999*999=998,001)
 
 arb:
@@ -39,7 +39,7 @@ training:
   batch_size: 512
   max_epochs: 200
   checkpoint_every_steps: 0
-  max_seq_len: 64
+  max_seq_len: 32
   warmup_steps: 100
   grad_clip: 1.0
   log_every: 10

@@ -672,6 +672,14 @@ class TransformerWithARB(nn.Module):
         self._generation_mode = True
         self._cached_lora_gate = None
 
+        # Get digit lookup table for dynamic gate control
+        # (used to turn off LoRA/injection after answer digits end)
+        first_arb = next(iter(self.arbs.values()))
+        digit_lookup = first_arb.extract.token_digit_value  # [V], -1 = not a digit
+        B = input_ids.shape[0]
+        device = input_ids.device
+        answer_started = torch.zeros(B, dtype=torch.bool, device=device)
+
         try:
             for _ in range(max_new_tokens):
                 cache_len = cache.get_seq_length() if cache else 0
@@ -711,6 +719,25 @@ class TransformerWithARB(nn.Module):
                     next_token = torch.multinomial(probs, num_samples=1)
 
                 generated = torch.cat([generated, next_token], dim=1)
+
+                # Dynamic LoRA/injection gating: turn off after answer ends
+                # Answer = contiguous digit tokens after '='. Once a non-digit
+                # is generated, revert to pure base model for the rest.
+                if self._cached_lora_gate is not None and self._cached_lora_gate.any():
+                    tok_ids = next_token.squeeze(-1)  # [B]
+                    clamped = tok_ids.clamp(0, digit_lookup.size(0) - 1)
+                    is_digit = digit_lookup[clamped] >= 0  # [B]
+                    answer_started = answer_started | is_digit
+                    answer_ended = answer_started & ~is_digit  # [B]
+                    if answer_ended.any():
+                        # Turn off LoRA gate for finished elements
+                        gate = self._cached_lora_gate.view(B)  # [B]
+                        gate[answer_ended] = 0.0
+                        self._cached_lora_gate = gate.view(B, 1, 1)
+                        # Turn off ARB injection for finished elements
+                        for arb in self.arbs.values():
+                            if arb._cached_has_eq is not None:
+                                arb._cached_has_eq[answer_ended] = False
 
                 # Stop at EOS token
                 if (next_token == self.base_model.config.eos_token_id).all():

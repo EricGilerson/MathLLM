@@ -694,15 +694,22 @@ class ARBTrainer:
         if "lora_layers_state" in ckpt and hasattr(self.model, "lora_layers") and self.model.lora_layers is not None:
             self.model.lora_layers.load_state_dict(ckpt["lora_layers_state"])
 
-        self.global_step = ckpt["global_step"]
         saved_steps_per_epoch = ckpt.get("steps_per_epoch", self.steps_per_epoch)
 
         if "completed_epochs" in ckpt:
             self.completed_epochs = ckpt["completed_epochs"]
             self.batches_completed_in_epoch = ckpt.get("batches_completed_in_epoch", 0)
         else:
-            self.completed_epochs = self.global_step // max(saved_steps_per_epoch, 1)
-            self.batches_completed_in_epoch = self.global_step % max(saved_steps_per_epoch, 1)
+            self.completed_epochs = ckpt["global_step"] // max(saved_steps_per_epoch, 1)
+            self.batches_completed_in_epoch = ckpt["global_step"] % max(saved_steps_per_epoch, 1)
+
+        # Recompute global_step from completed epochs using the CURRENT
+        # steps_per_epoch so it stays consistent with total_training_steps
+        # when the dataset size or batch size changes between runs.
+        self.global_step = (
+            self.completed_epochs * self.steps_per_epoch
+            + min(self.batches_completed_in_epoch, self.steps_per_epoch)
+        )
 
         self._restore_rng_state(ckpt.get("rng_state"))
 
@@ -732,11 +739,12 @@ class ARBTrainer:
             )
 
         if saved_steps_per_epoch != self.steps_per_epoch:
-            logger.warning(
-                "Checkpoint was created with %s steps/epoch, current run has %s. "
-                "Mid-epoch resume may be inaccurate if the dataset changed.",
+            logger.info(
+                "Dataset/batch size changed: checkpoint had %s steps/epoch, "
+                "current run has %s. Resuming at epoch %s.",
                 saved_steps_per_epoch,
                 self.steps_per_epoch,
+                self.completed_epochs,
             )
 
         logger.info(

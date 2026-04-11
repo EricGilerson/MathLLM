@@ -32,7 +32,7 @@ arb:
   - self_attn.v_proj
   inject_after_norm: true
 data:
-  num_positive: 500000
+  num_positive: 100000
   num_negative: 0
   num_edge_cases: 0
   max_digits: 3

@@ -20,7 +20,7 @@ arb:
   lora_alpha: 32.0
 
 data:
-  num_positive: 500000
+  num_positive: 100000
   num_negative: 0
   num_edge_cases: 0
   max_digits: 3
@@ -34,7 +34,7 @@ training:
   base_model: "HuggingFaceTB/SmolLM2-360M"
   lr: 5.0e-4
   weight_decay: 0.01
-  batch_size: 512
+  batch_size: 64
   max_epochs: 200
   checkpoint_every_steps: 0
   max_seq_len: 32

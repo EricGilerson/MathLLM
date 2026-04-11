@@ -1,12 +1,11 @@
 {
-  "_attn_implementation_autoset": true,
-  "_name_or_path": "HuggingFaceTB/SmolLM2-360M",
   "architectures": [
     "LlamaForCausalLM"
   ],
   "attention_bias": false,
   "attention_dropout": 0.0,
   "bos_token_id": 0,
+  "dtype": "float32",
   "eos_token_id": 0,
   "head_dim": 64,
   "hidden_act": "silu",
@@ -26,8 +25,7 @@
   "rope_scaling": null,
   "rope_theta": 100000,
   "tie_word_embeddings": true,
-  "torch_dtype": "float32",
-  "transformers_version": "4.47.1",
+  "transformers_version": "4.57.6",
   "use_cache": true,
   "vocab_size": 49152
 }

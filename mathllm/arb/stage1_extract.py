@@ -50,6 +50,10 @@ class OperandExtractor(nn.Module):
             "is_operator", torch.zeros(1, dtype=torch.bool),
             persistent=True,
         )
+        self.register_buffer(
+            "op_token_to_result_idx", torch.full((1,), -1, dtype=torch.long),
+            persistent=True,
+        )
         # Whether this tokenizer uses per-digit tokenization
         self._per_digit = False
 
@@ -101,12 +105,17 @@ class OperandExtractor(nn.Module):
                     val //= 10
             self.register_buffer("token_digits_full", full_table, persistent=True)
 
-        # Build operator mask
+        # Build operator mask and operator-to-result-index mapping.
+        # Result index order matches _decode_to_digits concatenation:
+        #   0=add, 1=sub, 2=mul, 3=exp, 4=div
         is_op = torch.zeros(vocab_size, dtype=torch.bool)
+        op_result_idx = torch.full((vocab_size,), -1, dtype=torch.long)
+        _OP_TO_INDEX = {'+': 0, '-': 1, '*': 2, '^': 3, '/': 4}
         for op_char in ['+', '-', '*', '/', '^']:
             op_ids = tokenizer.encode(op_char, add_special_tokens=False)
             if len(op_ids) == 1:
                 is_op[op_ids[0]] = True
+                op_result_idx[op_ids[0]] = _OP_TO_INDEX[op_char]
             else:
                 import logging
                 logging.getLogger(__name__).warning(
@@ -117,6 +126,7 @@ class OperandExtractor(nn.Module):
 
         self.token_digit_value = digit_val
         self.is_operator = is_op
+        self.register_buffer("op_token_to_result_idx", op_result_idx, persistent=True)
 
     def _find_operator_positions(self, input_ids: Tensor) -> Tensor:
         """Find the position of the first operator token in each sequence."""

@@ -231,6 +231,46 @@ class ArithmeticResidualBlock(nn.Module):
         )
         return result.to(device=device, dtype=a_circle.dtype)
 
+    def _select_operation_result(self, results: Tensor, input_ids: Tensor) -> Tensor:
+        """Zero out all operation results except the one matching the detected operator.
+
+        The ARB computes all 5 operations (add, sub, mul, exp, div) in parallel,
+        but only one is relevant per input. This masks the 4 irrelevant results
+        so the injection carries a single source of truth — the LoRA's job becomes
+        purely digit-to-token decoding, not operation routing.
+
+        Result layout: [add(K), sub(K+1), mul(K), exp(K), div(K)] = 5K+1
+        """
+        # Skip if token tables haven't been built yet (unit tests with synthetic IDs)
+        if self.extract.op_token_to_result_idx.size(0) <= 1:
+            return results
+
+        B, S, D = results.shape
+        K = self.num_digits
+        device = results.device
+
+        # Find operator position and look up its result index (0-4)
+        op_pos = self.extract._find_operator_positions(input_ids)  # [B]
+        op_tokens = input_ids.gather(1, op_pos.unsqueeze(1)).squeeze(1)  # [B]
+        op_clamped = op_tokens.clamp(0, self.extract.op_token_to_result_idx.size(0) - 1)
+        op_indices = self.extract.op_token_to_result_idx[op_clamped]  # [B], 0-4 or -1
+
+        # Start/end indices for each operation in the concatenated result vector
+        starts = torch.tensor([0, K, 2 * K + 1, 3 * K + 1, 4 * K + 1], device=device)
+        ends = torch.tensor([K, 2 * K + 1, 3 * K + 1, 4 * K + 1, 5 * K + 1], device=device)
+
+        valid = op_indices >= 0  # [B]
+        idx = op_indices.clamp(0, 4)
+        sel_start = starts[idx]  # [B]
+        sel_end = ends[idx]  # [B]
+
+        # Build per-batch mask [B, D] and broadcast over sequence positions
+        dim_range = torch.arange(D, device=device).unsqueeze(0)  # [1, D]
+        mask = (dim_range >= sel_start.unsqueeze(1)) & (dim_range < sel_end.unsqueeze(1))
+        mask = mask & valid.unsqueeze(1)
+
+        return results * mask.float().unsqueeze(1)  # [B, 1, D] broadcasts over S
+
     def forward(
         self,
         h: Tensor,
@@ -264,6 +304,10 @@ class ArithmeticResidualBlock(nn.Module):
         # Stage 3: Compute + CRT decode to digit vectors
         # [B, S, 5*K+1] — clean decimal digits, not circle encodings
         results = self._decode_to_digits(a_circle, b_circle, b_exp_circle)
+
+        # Select only the result matching the detected operator token.
+        # Eliminates the routing problem: injection carries one answer.
+        results = self._select_operation_result(results, input_ids)
 
         # Build injection mask: only inject at '=' position and after.
         B, S = input_ids.shape

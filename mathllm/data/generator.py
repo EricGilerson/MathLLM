@@ -614,8 +614,16 @@ class ArithmeticDataGenerator:
         return ArithmeticRecord(text=f"{a}^{b}={result}\n", op_type="exp", operand_a=a, operand_b=b, result=result)
 
     def _generate_pure_division(self) -> ArithmeticRecord | None:
-        b = self.rng.randint(1, 999)
-        quotient = self.rng.randint(1, max(1, self.max_result // max(b, 1)))
+        # Sample divisor and quotient with balanced digit counts (like add/sub/mul)
+        # so the training distribution matches evaluation across all digit ranges.
+        b_digits = self.rng.randint(1, self.config.max_digits)
+        b_low = 10 ** (b_digits - 1) if b_digits > 1 else 1
+        b = self.rng.randint(b_low, 10 ** b_digits - 1)
+
+        q_digits = self.rng.randint(1, self.config.max_digits)
+        q_low = 10 ** (q_digits - 1) if q_digits > 1 else 1
+        quotient = self.rng.randint(q_low, 10 ** q_digits - 1)
+
         a = b * quotient
         if a > self.max_result:
             return None

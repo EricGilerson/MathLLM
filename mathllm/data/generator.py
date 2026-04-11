@@ -114,6 +114,12 @@ class ArithmeticDataGenerator:
 
     def _generate_subtraction(self) -> ArithmeticRecord | None:
         a, b = self._sample_operands()
+        # Enforce a >= b so result is non-negative. Signed subtraction would
+        # require encoding the sign explicitly in the ARB injection format
+        # (e.g. a dedicated sign token or two's-complement digit encoding),
+        # which is not yet implemented.
+        if a < b:
+            a, b = b, a
         result = a - b
         template = self.rng.choice(SUBTRACTION_TEMPLATES)
         text = template.format(a=a, b=b, result=result)
@@ -578,6 +584,8 @@ class ArithmeticDataGenerator:
 
     def _generate_pure_subtraction(self) -> ArithmeticRecord | None:
         a, b = self._sample_operands()
+        if a < b:
+            a, b = b, a
         result = a - b
         return ArithmeticRecord(text=f"{a}-{b}={result}\n", op_type="sub", operand_a=a, operand_b=b, result=result)
 

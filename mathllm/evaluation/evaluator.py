@@ -141,6 +141,10 @@ class ARBEvaluator:
                 for _ in range(samples):
                     a, b = _sample_operands(n, rng)
 
+                    # Enforce a >= b for subtraction (non-negative results only)
+                    if op == "sub" and a < b:
+                        a, b = b, a
+
                     # For multiplication, use smaller operands to stay in range
                     if op == "mul" and n > 5:
                         a, b = _sample_operands(min(n, 4), rng)

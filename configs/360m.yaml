@@ -18,11 +18,6 @@ arb:
   # LM head LoRA (increased rank for digit-to-token mapping)
   lora_rank: 32
   lora_alpha: 32.0
-  # Layer LoRA on final transformer layers
-  lora_layer_positions: [28, 29, 30, 31]
-  lora_layer_rank: 16
-  lora_layer_alpha: 16.0
-  lora_layer_modules: ["self_attn.q_proj", "self_attn.v_proj", "mlp.down_proj"]
 
 data:
   num_positive: 500000
@@ -39,7 +34,7 @@ training:
   base_model: "HuggingFaceTB/SmolLM2-360M"
   lr: 5.0e-4
   weight_decay: 0.01
-  batch_size: 1024
+  batch_size: 512
   max_epochs: 200
   checkpoint_every_steps: 0
   max_seq_len: 64
@@ -56,8 +51,8 @@ training:
   max_eval_batches: 20
   eval_batch_size: 64
   phase1_epochs: 0
-  phase2_epochs: 50
-  phase3_epochs: 50
+  phase2_epochs: 20
+  phase3_epochs: 80
   aux_loss_weight: 1.0
   aux_loss_decay: 0.1
   phase1_aux_only: true

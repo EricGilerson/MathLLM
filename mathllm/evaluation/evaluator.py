@@ -150,7 +150,7 @@ class ARBEvaluator:
                         continue
 
                     symbol = OP_SYMBOLS[op]
-                    prompt = f"{a} {symbol} {b} ="
+                    prompt = f"{a}{symbol}{b}="
                     generated = self._generate_text(
                         prompt,
                         max_new_tokens=len(str(abs(expected))) + 5,
@@ -222,7 +222,7 @@ class ARBEvaluator:
                 if a > 10**10:
                     continue
 
-                prompt = f"{a} / {b} ="
+                prompt = f"{a}/{b}="
                 generated = self._generate_text(
                     prompt, max_new_tokens=len(str(quotient)) + 5
                 )
@@ -282,7 +282,7 @@ class ARBEvaluator:
                     continue
 
                 x_str = f"{x:.6f}"
-                prompt = f"{fname}({x_str}) ="
+                prompt = f"{fname}({x_str})="
                 generated = self._generate_text(prompt, max_new_tokens=20)
                 extracted = self._extract_float_from_generation(generated)
 
@@ -338,7 +338,7 @@ class ARBEvaluator:
                 if expected is None or abs(expected) > 1e9:
                     continue
 
-                prompt = f"{a} {symbol} {b} ="
+                prompt = f"{a}{symbol}{b}="
                 generated = self._generate_text(prompt, max_new_tokens=20)
                 extracted = self._extract_float_from_generation(generated)
 
@@ -393,7 +393,7 @@ class ARBEvaluator:
             if abs(expected) > 10**10:
                 continue
 
-            prompt = f"({a} {op1} {b}) {op2} {c} ="
+            prompt = f"({a}{op1}{b}){op2}{c}="
             generated = self._generate_text(
                 prompt, max_new_tokens=len(str(abs(expected))) + 5
             )
@@ -490,17 +490,12 @@ class ARBEvaluator:
             lora_module.lora_A.data.copy_(saved[key]["lora_A"])
             lora_module.lora_B.data.copy_(saved[key]["lora_B"])
 
-    def _run_accuracy_test(
-        self, num_samples: int, rng, pure_arithmetic: bool = False
-    ) -> int:
+    def _run_accuracy_test(self, num_samples: int, rng) -> int:
         """Run a quick accuracy test on 2-digit addition, return correct count."""
         correct = 0
         for _ in range(num_samples):
             a, b = _sample_operands(2, rng)
-            if pure_arithmetic:
-                prompt = f"{a}+{b}="
-            else:
-                prompt = f"{a} + {b} ="
+            prompt = f"{a}+{b}="
             expected = a + b
             generated = self._generate_text(prompt, max_new_tokens=10)
             extracted = self._extract_number_from_generation(generated)
@@ -538,7 +533,6 @@ class ARBEvaluator:
         self,
         num_samples: int = 50,
         seed: int = 99,
-        pure_arithmetic: bool = False,
     ) -> dict[str, float]:
         """Four-way ablation proving the ARB is the source of improvement.
 
@@ -560,14 +554,14 @@ class ARBEvaluator:
 
         # 1. Full model (ARB + LoRA)
         rng = random.Random(seed)
-        full_correct = self._run_accuracy_test(num_samples, rng, pure_arithmetic)
+        full_correct = self._run_accuracy_test(num_samples, rng)
         results["full"] = full_correct / num_samples
         logger.info(f"  Full (ARB+LoRA): {results['full']:.1%}")
 
         # 2. LoRA only (zero ARB injection)
         saved_arb = self._zero_injection()
         rng = random.Random(seed)
-        lora_only_correct = self._run_accuracy_test(num_samples, rng, pure_arithmetic)
+        lora_only_correct = self._run_accuracy_test(num_samples, rng)
         results["lora_only"] = lora_only_correct / num_samples
         logger.info(f"  LoRA only: {results['lora_only']:.1%}")
         self._restore_injection(saved_arb)
@@ -576,7 +570,7 @@ class ARBEvaluator:
         saved_lora = self._zero_lora()
         saved_layer_lora = self._zero_layer_lora()
         rng = random.Random(seed)
-        arb_only_correct = self._run_accuracy_test(num_samples, rng, pure_arithmetic)
+        arb_only_correct = self._run_accuracy_test(num_samples, rng)
         results["arb_only"] = arb_only_correct / num_samples
         logger.info(f"  ARB only: {results['arb_only']:.1%}")
         self._restore_layer_lora(saved_layer_lora)
@@ -587,7 +581,7 @@ class ARBEvaluator:
         saved_lora = self._zero_lora()
         saved_layer_lora = self._zero_layer_lora()
         rng = random.Random(seed)
-        baseline_correct = self._run_accuracy_test(num_samples, rng, pure_arithmetic)
+        baseline_correct = self._run_accuracy_test(num_samples, rng)
         results["baseline"] = baseline_correct / num_samples
         logger.info(f"  Baseline: {results['baseline']:.1%}")
         self._restore_layer_lora(saved_layer_lora)

@@ -274,6 +274,57 @@ class ArithmeticResidualBlock(nn.Module):
         valid = (op_indices >= 0).float().view(B, 1, 1)
         return selected * valid
 
+    def _reorder_to_msb_first(self, results: Tensor) -> Tensor:
+        """Reorder digit slots from LSB-first to MSB-first (left-aligned).
+
+        CRT decode produces LSB-first: d[0]=ones, d[1]=tens, d[2]=hundreds.
+        Text output is MSB-first: "579" outputs '5' then '7' then '9'.
+
+        With LSB-first, the model at position P must compute:
+            output = d[num_significant - 1 - P]
+        — a conditional reverse-index that depends on answer length.
+
+        With MSB-first, the model at position P simply reads d[P].
+        Sentinel value -1 marks positions past the last significant digit,
+        teaching the model when to emit a termination token.
+
+        All operations are standard PyTorch tensor ops — no CPU, no loops.
+
+        Args:
+            results: [B, S, K+1] — K digits (LSB-first) + sign bit
+
+        Returns:
+            [B, S, K+1] — K digits (MSB-first, -1 padding) + sign bit
+        """
+        K = self.num_digits
+        digits = results[..., :K]  # [B, S, K]
+        sign = results[..., K:]    # [B, S, 1]
+        device = digits.device
+
+        # Index tensor [0, 1, ..., K-1] broadcast to all elements
+        indices = torch.arange(K, device=device, dtype=torch.long)  # [K]
+
+        # Find num_significant_digits per element:
+        # highest non-zero index + 1, or 1 for all-zero (represents "0")
+        nonzero = digits != 0                                       # [B, S, K]
+        # Where nonzero, take the digit index; else -1
+        highest = torch.where(
+            nonzero, indices, torch.tensor(-1, device=device),
+        ).amax(dim=-1)                                              # [B, S]
+        num_sig = torch.where(
+            nonzero.any(dim=-1), highest + 1, torch.ones_like(highest),
+        )                                                           # [B, S]
+
+        # For output position p, source from LSB index (num_sig - 1 - p)
+        num_sig_k = num_sig.unsqueeze(-1)                           # [B, S, 1]
+        source = (num_sig_k - 1 - indices).clamp(0, K - 1)         # [B, S, K]
+        valid = indices < num_sig_k                                 # [B, S, K]
+
+        msb_digits = digits.gather(-1, source)                      # [B, S, K]
+        msb_digits = torch.where(valid, msb_digits, torch.full_like(msb_digits, -1.0))
+
+        return torch.cat([msb_digits, sign], dim=-1)                # [B, S, K+1]
+
     def forward(
         self,
         h: Tensor,
@@ -310,6 +361,12 @@ class ArithmeticResidualBlock(nn.Module):
         # Select the result matching the detected operator and relocate
         # to fixed positions [0:K+1], so injection always reads the same structure.
         results = self._select_operation_result(all_results, input_ids)  # [B, S, K+1]
+
+        # Reorder digits from LSB-first (CRT output) to MSB-first (text order).
+        # This lets the model at answer position P simply read d[P] = the P-th
+        # most-significant digit, instead of learning a length-dependent
+        # conditional reverse-index.  Sentinel -1 marks where to stop.
+        results = self._reorder_to_msb_first(results)  # [B, S, K+1], now MSB-first
 
         # Build injection mask: only inject at '=' position and after.
         B, S = input_ids.shape

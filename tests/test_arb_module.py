@@ -284,3 +284,132 @@ class TestOperationSelection:
             captured["selected"][0, 0, :K],
             captured["selected"][1, 0, :K],
         ), "different operations should produce different selected digits"
+
+
+class TestMSBReordering:
+    """Tests for _reorder_to_msb_first: LSB-first digits → MSB-first (left-aligned)."""
+
+    def _make_arb(self):
+        return _build_test_arb(with_op_selection=True)
+
+    def test_single_digit(self):
+        """N=8: LSB [8,0,0,...] → MSB [8,-1,-1,...], sign preserved."""
+        arb = self._make_arb()
+        K = arb.num_digits
+        results = torch.zeros(1, 1, K + 1)
+        results[0, 0, 0] = 8.0  # LSB: d[0]=8, rest=0
+        msb = arb._reorder_to_msb_first(results)
+        assert msb[0, 0, 0].item() == 8.0, "MSD should be 8"
+        assert (msb[0, 0, 1:K] == -1.0).all(), "trailing should be sentinel -1"
+        assert msb[0, 0, K].item() == 0.0, "sign bit unchanged"
+
+    def test_two_digits(self):
+        """N=68: LSB [8,6,0,...] → MSB [6,8,-1,...]."""
+        arb = self._make_arb()
+        K = arb.num_digits
+        results = torch.zeros(1, 1, K + 1)
+        results[0, 0, 0] = 8.0
+        results[0, 0, 1] = 6.0
+        msb = arb._reorder_to_msb_first(results)
+        assert msb[0, 0, 0].item() == 6.0
+        assert msb[0, 0, 1].item() == 8.0
+        assert (msb[0, 0, 2:K] == -1.0).all()
+
+    def test_three_digits(self):
+        """N=579: LSB [9,7,5,0,...] → MSB [5,7,9,-1,...]."""
+        arb = self._make_arb()
+        K = arb.num_digits
+        results = torch.zeros(1, 1, K + 1)
+        results[0, 0, 0] = 9.0
+        results[0, 0, 1] = 7.0
+        results[0, 0, 2] = 5.0
+        msb = arb._reorder_to_msb_first(results)
+        assert msb[0, 0, 0].item() == 5.0
+        assert msb[0, 0, 1].item() == 7.0
+        assert msb[0, 0, 2].item() == 9.0
+        assert (msb[0, 0, 3:K] == -1.0).all()
+
+    def test_internal_zeros_preserved(self):
+        """N=100: LSB [0,0,1,0,...] → MSB [1,0,0,-1,...].
+
+        Internal zeros must NOT become sentinels.
+        """
+        arb = self._make_arb()
+        K = arb.num_digits
+        results = torch.zeros(1, 1, K + 1)
+        results[0, 0, 2] = 1.0  # hundreds digit
+        msb = arb._reorder_to_msb_first(results)
+        assert msb[0, 0, 0].item() == 1.0
+        assert msb[0, 0, 1].item() == 0.0, "internal zero must be 0, not sentinel"
+        assert msb[0, 0, 2].item() == 0.0, "internal zero must be 0, not sentinel"
+        assert (msb[0, 0, 3:K] == -1.0).all()
+
+    def test_zero_result(self):
+        """N=0: all-zero LSB → MSB [0,-1,-1,...] (one significant digit)."""
+        arb = self._make_arb()
+        K = arb.num_digits
+        results = torch.zeros(1, 1, K + 1)
+        msb = arb._reorder_to_msb_first(results)
+        assert msb[0, 0, 0].item() == 0.0, "zero should have one digit"
+        assert (msb[0, 0, 1:K] == -1.0).all(), "rest should be sentinel"
+
+    def test_sign_bit_preserved(self):
+        """Sign bit at index K should pass through unchanged."""
+        arb = self._make_arb()
+        K = arb.num_digits
+        results = torch.zeros(1, 1, K + 1)
+        results[0, 0, 0] = 5.0
+        results[0, 0, K] = 1.0  # sign = negative
+        msb = arb._reorder_to_msb_first(results)
+        assert msb[0, 0, K].item() == 1.0, "sign bit must be preserved"
+
+    def test_batch_independence(self):
+        """Different batch elements with different lengths reorder independently."""
+        arb = self._make_arb()
+        K = arb.num_digits
+        results = torch.zeros(3, 1, K + 1)
+        # Batch 0: N=8 (1 digit)
+        results[0, 0, 0] = 8.0
+        # Batch 1: N=68 (2 digits)
+        results[1, 0, 0] = 8.0
+        results[1, 0, 1] = 6.0
+        # Batch 2: N=579 (3 digits)
+        results[2, 0, 0] = 9.0
+        results[2, 0, 1] = 7.0
+        results[2, 0, 2] = 5.0
+
+        msb = arb._reorder_to_msb_first(results)
+        assert msb[0, 0, 0].item() == 8.0
+        assert msb[0, 0, 1].item() == -1.0
+        assert msb[1, 0, 0].item() == 6.0
+        assert msb[1, 0, 1].item() == 8.0
+        assert msb[1, 0, 2].item() == -1.0
+        assert msb[2, 0, 0].item() == 5.0
+        assert msb[2, 0, 1].item() == 7.0
+        assert msb[2, 0, 2].item() == 9.0
+
+    def test_large_number_fills_all_slots(self):
+        """When all K digits are significant, no sentinels appear."""
+        arb = self._make_arb()
+        K = arb.num_digits
+        results = torch.zeros(1, 1, K + 1)
+        # Fill all K digits (e.g. K=10, N=1234567890)
+        for i in range(K):
+            results[0, 0, i] = float(i + 1)
+        msb = arb._reorder_to_msb_first(results)
+        # MSB-first should be [K, K-1, ..., 2, 1]
+        for i in range(K):
+            assert msb[0, 0, i].item() == float(K - i), \
+                f"position {i}: expected {K - i}, got {msb[0, 0, i].item()}"
+
+    def test_all_tensor_ops_on_device(self):
+        """Verify the reordering stays on the input device (no CPU detour)."""
+        if not torch.cuda.is_available():
+            return  # skip on CPU-only machines
+        arb = self._make_arb().cuda()
+        K = arb.num_digits
+        results = torch.zeros(2, 3, K + 1, device="cuda")
+        results[0, 0, 0] = 5.0
+        results[0, 0, 1] = 7.0
+        msb = arb._reorder_to_msb_first(results)
+        assert msb.device.type == "cuda"

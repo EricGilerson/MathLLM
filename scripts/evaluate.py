@@ -32,9 +32,13 @@ def main():
                         help="Path to save evaluation results as JSON")
     parser.add_argument("--eval-texts", type=str, default=None,
                         help="Path to text file with eval texts for perplexity (one per line)")
+    parser.add_argument("--batch-size", type=int, default=None,
+                        help="Override evaluation batch size for generation and perplexity")
     args = parser.parse_args()
 
     config = load_config(args.config)
+    if args.batch_size is not None:
+        config.evaluation.batch_size = args.batch_size
     device = get_device(config.training.device)
     logger.info(f"Using device: {device}")
 

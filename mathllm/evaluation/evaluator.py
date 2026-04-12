@@ -75,20 +75,79 @@ class ARBEvaluator:
         self.tokenizer = tokenizer
         self.config = config
         self.device = device or torch.device("cpu")
+        self.batch_size = max(1, int(getattr(config, "batch_size", 64)))
+        self._prepared_device: torch.device | None = None
+
+    def _prepare_model(self) -> None:
+        """Move the model once and warm runtime caches for evaluation."""
+        self.model.eval()
+        if self._prepared_device == self.device:
+            return
+
+        self.model.to(self.device)
+        if hasattr(self.model, "prepare_for_device"):
+            self.model.prepare_for_device(self.device)
+        self._prepared_device = self.device
+
+    def _generate_texts(
+        self,
+        prompts: list[str],
+        max_new_tokens: int | list[int] | None = None,
+    ) -> list[str]:
+        """Generate completions for a batch of prompts.
+
+        The current model generation path assumes equal prompt lengths, so
+        requests are grouped by tokenized length and generation length to
+        batch safely without padding artifacts.
+        """
+        if not prompts:
+            return []
+
+        self._prepare_model()
+
+        if isinstance(max_new_tokens, list):
+            if len(max_new_tokens) != len(prompts):
+                raise ValueError("max_new_tokens list must match prompts length")
+            max_tokens_per_prompt = max_new_tokens
+        else:
+            max_tokens = max_new_tokens or self.config.max_new_tokens
+            max_tokens_per_prompt = [max_tokens] * len(prompts)
+
+        grouped_requests: dict[tuple[int, int], list[tuple[int, str, torch.Tensor]]] = defaultdict(list)
+        completions = [""] * len(prompts)
+
+        for idx, (prompt, max_tokens) in enumerate(zip(prompts, max_tokens_per_prompt)):
+            input_ids = self.tokenizer(prompt, return_tensors="pt")["input_ids"].squeeze(0)
+            grouped_requests[(int(input_ids.numel()), int(max_tokens))].append(
+                (idx, prompt, input_ids)
+            )
+
+        for (input_len, max_tokens), requests in grouped_requests.items():
+            for start in range(0, len(requests), self.batch_size):
+                batch = requests[start:start + self.batch_size]
+                batch_input_ids = torch.stack(
+                    [input_ids for _, _, input_ids in batch], dim=0
+                ).to(self.device)
+
+                with torch.inference_mode():
+                    output_ids = self.model.generate(
+                        batch_input_ids,
+                        max_new_tokens=max_tokens,
+                        greedy=True,
+                    )
+
+                output_ids = output_ids[:, input_len:].detach().cpu()
+                for row, (idx, _, _) in enumerate(batch):
+                    completions[idx] = self.tokenizer.decode(
+                        output_ids[row].tolist(),
+                        skip_special_tokens=True,
+                    )
+
+        return completions
 
     def _generate_text(self, prompt: str, max_new_tokens: int | None = None) -> str:
         """Generate text from a prompt."""
-        max_tokens = max_new_tokens or self.config.max_new_tokens
-        input_ids = self.tokenizer.encode(prompt, return_tensors="pt").to(self.device)
-
-        with torch.no_grad():
-            output_ids = self.model.generate(
-                input_ids, max_new_tokens=max_tokens, greedy=True
-            )
-
-        full_text = self.tokenizer.decode(output_ids[0], skip_special_tokens=True)
-        # Return only the generated part (after prompt)
-        return full_text[len(prompt):]
+        return self._generate_texts([prompt], max_new_tokens=max_new_tokens)[0]
 
     def _extract_number_from_generation(self, text: str) -> str | None:
         """Extract the first integer (possibly negative) from generated text."""
@@ -126,8 +185,7 @@ class ARBEvaluator:
         import random
 
         rng = random.Random(seed)
-        self.model.eval()
-        self.model.to(self.device)
+        self._prepare_model()
 
         samples = num_samples or self.config.num_samples_per_config
         min_d, max_d = self.config.max_digits_range
@@ -135,8 +193,7 @@ class ARBEvaluator:
 
         for n in range(min_d, max_d + 1):
             for op in ["add", "sub", "mul"]:
-                correct = 0
-                total = 0
+                cases: list[tuple[str, int, int]] = []
 
                 for _ in range(samples):
                     a, b = _sample_operands(n, rng)
@@ -155,15 +212,18 @@ class ARBEvaluator:
 
                     symbol = OP_SYMBOLS[op]
                     prompt = f"{a}{symbol}{b}="
-                    generated = self._generate_text(
-                        prompt,
-                        max_new_tokens=len(str(abs(expected))) + 5,
-                    )
+                    cases.append((prompt, expected, len(str(abs(expected))) + 5))
 
+                generated_texts = self._generate_texts(
+                    [prompt for prompt, _, _ in cases],
+                    [max_tokens for _, _, max_tokens in cases],
+                )
+                correct = 0
+                for (_, expected, _), generated in zip(cases, generated_texts):
                     extracted = self._extract_number_from_generation(generated)
                     if extracted is not None and int(extracted) == expected:
                         correct += 1
-                    total += 1
+                total = len(cases)
 
                 accuracy = correct / max(total, 1)
                 key = f"{op}_{n}digit"
@@ -171,6 +231,7 @@ class ARBEvaluator:
                 logger.info(f"  {key}: {accuracy:.1%} ({correct}/{total})")
 
         # Exponentiation (separate because operand sampling differs)
+        exp_cases: list[tuple[str, int, int]] = []
         for _ in range(samples):
             a = rng.randint(2, 20)
             b = rng.randint(0, 10)
@@ -178,9 +239,13 @@ class ARBEvaluator:
             if expected is None:
                 continue
             prompt = f"{a}^{b}="
-            generated = self._generate_text(
-                prompt, max_new_tokens=len(str(expected)) + 5
-            )
+            exp_cases.append((prompt, expected, len(str(expected)) + 5))
+
+        generated_texts = self._generate_texts(
+            [prompt for prompt, _, _ in exp_cases],
+            [max_tokens for _, _, max_tokens in exp_cases],
+        )
+        for (_, expected, _), generated in zip(exp_cases, generated_texts):
             extracted = self._extract_number_from_generation(generated)
             if extracted is not None and int(extracted) == expected:
                 results.setdefault("exp_correct", 0)
@@ -208,16 +273,14 @@ class ARBEvaluator:
         import random
 
         rng = random.Random(seed)
-        self.model.eval()
-        self.model.to(self.device)
+        self._prepare_model()
 
         samples = num_samples or self.config.num_samples_per_config
         min_d, max_d = self.config.max_digits_range
         results: dict[str, float] = {}
 
         for n in range(min_d, min(max_d + 1, 6)):  # up to 5-digit dividends
-            correct = 0
-            total = 0
+            cases: list[tuple[str, int, int]] = []
 
             for _ in range(samples):
                 b = rng.randint(2, 10 ** min(n, 3) - 1)
@@ -227,13 +290,18 @@ class ARBEvaluator:
                     continue
 
                 prompt = f"{a}/{b}="
-                generated = self._generate_text(
-                    prompt, max_new_tokens=len(str(quotient)) + 5
-                )
+                cases.append((prompt, quotient, len(str(quotient)) + 5))
+
+            generated_texts = self._generate_texts(
+                [prompt for prompt, _, _ in cases],
+                [max_tokens for _, _, max_tokens in cases],
+            )
+            correct = 0
+            for (_, quotient, _), generated in zip(cases, generated_texts):
                 extracted = self._extract_number_from_generation(generated)
                 if extracted is not None and int(extracted) == quotient:
                     correct += 1
-                total += 1
+            total = len(cases)
 
             accuracy = correct / max(total, 1)
             key = f"div_{n}digit"
@@ -259,8 +327,7 @@ class ARBEvaluator:
         import random
 
         rng = random.Random(seed)
-        self.model.eval()
-        self.model.to(self.device)
+        self._prepare_model()
 
         samples = num_samples or self.config.num_samples_per_config
         results: dict[str, float] = {}
@@ -276,8 +343,7 @@ class ARBEvaluator:
         }
 
         for fname, (sampler, evaluator) in functions.items():
-            correct = 0
-            total = 0
+            cases: list[tuple[str, float]] = []
 
             for _ in range(samples):
                 x = sampler()
@@ -287,7 +353,14 @@ class ARBEvaluator:
 
                 x_str = f"{x:.6f}"
                 prompt = f"{fname}({x_str})="
-                generated = self._generate_text(prompt, max_new_tokens=20)
+                cases.append((prompt, expected))
+
+            generated_texts = self._generate_texts(
+                [prompt for prompt, _ in cases],
+                max_new_tokens=20,
+            )
+            correct = 0
+            for (_, expected), generated in zip(cases, generated_texts):
                 extracted = self._extract_float_from_generation(generated)
 
                 if extracted is not None:
@@ -296,7 +369,7 @@ class ARBEvaluator:
                             correct += 1
                     elif abs(extracted - expected) / max(abs(expected), 1e-10) < tolerance:
                         correct += 1
-                total += 1
+            total = len(cases)
 
             accuracy = correct / max(total, 1)
             results[f"{fname}_accuracy"] = accuracy
@@ -318,8 +391,7 @@ class ARBEvaluator:
         import random
 
         rng = random.Random(seed)
-        self.model.eval()
-        self.model.to(self.device)
+        self._prepare_model()
 
         samples = num_samples or self.config.num_samples_per_config
         results: dict[str, float] = {}
@@ -332,8 +404,7 @@ class ARBEvaluator:
         }
 
         for op_name, (symbol, compute) in float_ops.items():
-            correct = 0
-            total = 0
+            cases: list[tuple[str, float]] = []
 
             for _ in range(samples):
                 a = round(rng.uniform(0.1, 1000), rng.randint(1, 4))
@@ -343,7 +414,14 @@ class ARBEvaluator:
                     continue
 
                 prompt = f"{a}{symbol}{b}="
-                generated = self._generate_text(prompt, max_new_tokens=20)
+                cases.append((prompt, expected))
+
+            generated_texts = self._generate_texts(
+                [prompt for prompt, _ in cases],
+                max_new_tokens=20,
+            )
+            correct = 0
+            for (_, expected), generated in zip(cases, generated_texts):
                 extracted = self._extract_float_from_generation(generated)
 
                 if extracted is not None:
@@ -352,7 +430,7 @@ class ARBEvaluator:
                             correct += 1
                     elif abs(extracted - expected) / max(abs(expected), 1e-10) < tolerance:
                         correct += 1
-                total += 1
+            total = len(cases)
 
             accuracy = correct / max(total, 1)
             results[f"{op_name}_accuracy"] = accuracy
@@ -376,14 +454,12 @@ class ARBEvaluator:
         import random
 
         rng = random.Random(seed)
-        self.model.eval()
-        self.model.to(self.device)
+        self._prepare_model()
 
         samples = num_samples or self.config.num_samples_per_config
         ops = ["+", "-", "*"]
 
-        correct = 0
-        total = 0
+        cases: list[tuple[str, int, int]] = []
 
         for _ in range(samples):
             a = rng.randint(1, 99)
@@ -398,13 +474,18 @@ class ARBEvaluator:
                 continue
 
             prompt = f"({a}{op1}{b}){op2}{c}="
-            generated = self._generate_text(
-                prompt, max_new_tokens=len(str(abs(expected))) + 5
-            )
+            cases.append((prompt, expected, len(str(abs(expected))) + 5))
+
+        generated_texts = self._generate_texts(
+            [prompt for prompt, _, _ in cases],
+            [max_tokens for _, _, max_tokens in cases],
+        )
+        correct = 0
+        for (_, expected, _), generated in zip(cases, generated_texts):
             extracted = self._extract_number_from_generation(generated)
             if extracted is not None and int(extracted) == expected:
                 correct += 1
-            total += 1
+        total = len(cases)
 
         accuracy = correct / max(total, 1)
         logger.info(f"  multi_step_2: {accuracy:.1%} ({correct}/{total})")
@@ -496,12 +577,19 @@ class ARBEvaluator:
 
     def _run_accuracy_test(self, num_samples: int, rng) -> int:
         """Run a quick accuracy test on 2-digit addition, return correct count."""
-        correct = 0
+        cases: list[tuple[str, int]] = []
         for _ in range(num_samples):
             a, b = _sample_operands(2, rng)
             prompt = f"{a}+{b}="
             expected = a + b
-            generated = self._generate_text(prompt, max_new_tokens=10)
+            cases.append((prompt, expected))
+
+        generated_texts = self._generate_texts(
+            [prompt for prompt, _ in cases],
+            max_new_tokens=10,
+        )
+        correct = 0
+        for (_, expected), generated in zip(cases, generated_texts):
             extracted = self._extract_number_from_generation(generated)
             if extracted is not None and int(extracted) == expected:
                 correct += 1
@@ -518,8 +606,7 @@ class ARBEvaluator:
         import random
 
         rng = random.Random(seed)
-        self.model.eval()
-        self.model.to(self.device)
+        self._prepare_model()
 
         normal_correct = self._run_accuracy_test(num_samples, rng)
 
@@ -551,8 +638,7 @@ class ARBEvaluator:
         """
         import random
 
-        self.model.eval()
-        self.model.to(self.device)
+        self._prepare_model()
 
         results = {}
 
@@ -608,8 +694,7 @@ class ARBEvaluator:
         Returns:
             Dict with 'perplexity' value
         """
-        self.model.eval()
-        self.model.to(self.device)
+        self._prepare_model()
 
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
@@ -618,24 +703,33 @@ class ARBEvaluator:
         total_tokens = 0
 
         texts = eval_texts[:max_samples]
+        loader = DataLoader(texts, batch_size=self.batch_size, shuffle=False)
 
-        for text in tqdm(texts, desc="Perplexity", disable=len(texts) < 10):
+        for batch_texts in tqdm(loader, desc="Perplexity", disable=len(texts) < 10):
             encoding = self.tokenizer(
-                text, truncation=True, max_length=512, return_tensors="pt"
+                list(batch_texts),
+                truncation=True,
+                max_length=512,
+                padding=True,
+                return_tensors="pt",
             )
-            input_ids = encoding["input_ids"].to(self.device)
-            attention_mask = encoding["attention_mask"].to(self.device)
-
-            if input_ids.size(1) < 2:
+            input_ids = encoding["input_ids"]
+            attention_mask = encoding["attention_mask"]
+            valid_rows = attention_mask.sum(dim=1) >= 2
+            if not valid_rows.any():
                 continue
+
+            input_ids = input_ids[valid_rows].to(self.device)
+            attention_mask = attention_mask[valid_rows].to(self.device)
+            labels = input_ids.masked_fill(attention_mask == 0, -100)
 
             outputs = self.model(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
-                labels=input_ids,
+                labels=labels,
             )
             loss = outputs["loss"]
-            num_tokens = attention_mask.sum().item() - 1  # -1 for shifted labels
+            num_tokens = labels[:, 1:].ne(-100).sum().item()
             total_loss += loss.item() * num_tokens
             total_tokens += num_tokens
 

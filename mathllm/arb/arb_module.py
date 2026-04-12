@@ -65,12 +65,11 @@ class ArithmeticResidualBlock(nn.Module):
         self.eq_token_id = eq_token_id
         self.injection_pos_dim = injection_pos_dim
 
-        # Injection receives decoded digit vectors, not raw circle encodings.
-        # 5 operations: add (unsigned), sub (signed → digits + sign),
-        # mul (unsigned), exp (unsigned), div (unsigned)
-        # Sub has K+1 dims (K digits + sign bit), others have K dims each.
-        # Total: 4*K + (K+1) = 5K + 1
-        digit_result_dim = num_results * num_digits + 1  # +1 for sub sign bit
+        # Injection receives a single selected result: K digits + 1 sign bit.
+        # Operation selection (in _select_operation_result) picks the result
+        # matching the detected operator and places it at fixed positions,
+        # so the injection MLP always reads the same structure.
+        digit_result_dim = num_digits + 1  # K digits + sign bit
 
         # Position-aware injection: add learned answer-position embeddings
         # so each answer position gets a unique injection signal.
@@ -232,20 +231,22 @@ class ArithmeticResidualBlock(nn.Module):
         return result.to(device=device, dtype=a_circle.dtype)
 
     def _select_operation_result(self, results: Tensor, input_ids: Tensor) -> Tensor:
-        """Zero out all operation results except the one matching the detected operator.
+        """Extract the selected operation's digits into a fixed-position vector.
 
-        The ARB computes all 5 operations (add, sub, mul, exp, div) in parallel,
-        but only one is relevant per input. This masks the 4 irrelevant results
-        so the injection carries a single source of truth — the LoRA's job becomes
-        purely digit-to-token decoding, not operation routing.
+        The ARB computes all 5 operations in parallel, but only one is relevant.
+        This extracts that result and places it at fixed positions [0:K+1]
+        (K digits + 1 sign bit), so the injection MLP always reads the same
+        structure regardless of operation.
 
-        Result layout: [add(K), sub(K+1), mul(K), exp(K), div(K)] = 5K+1
+        Input:  [B, S, 5K+1] — all operations concatenated
+        Output: [B, S, K+1]  — selected operation's digits + sign bit
         """
         # Skip if token tables haven't been built yet (unit tests with synthetic IDs)
         if self.extract.op_token_to_result_idx.size(0) <= 1:
-            return results
+            # Return first K+1 dims as fallback for unit tests
+            return results[..., : self.num_digits + 1]
 
-        B, S, D = results.shape
+        B, S, _ = results.shape
         K = self.num_digits
         device = results.device
 
@@ -255,21 +256,23 @@ class ArithmeticResidualBlock(nn.Module):
         op_clamped = op_tokens.clamp(0, self.extract.op_token_to_result_idx.size(0) - 1)
         op_indices = self.extract.op_token_to_result_idx[op_clamped]  # [B], 0-4 or -1
 
-        # Start/end indices for each operation in the concatenated result vector
-        starts = torch.tensor([0, K, 2 * K + 1, 3 * K + 1, 4 * K + 1], device=device)
-        ends = torch.tensor([K, 2 * K + 1, 3 * K + 1, 4 * K + 1, 5 * K + 1], device=device)
+        # Pack all 5 operations into [B, S, 5, K+1] with one allocation.
+        # Sign bit at position K is 0 (from zeros) for unsigned ops.
+        K1 = K + 1
+        stacked = torch.zeros(B, S, 5, K1, device=device, dtype=results.dtype)
+        stacked[..., 0, :K] = results[..., 0:K]                   # add digits
+        stacked[..., 1, :]  = results[..., K : 2 * K + 1]         # sub digits + sign
+        stacked[..., 2, :K] = results[..., 2 * K + 1 : 3 * K + 1] # mul digits
+        stacked[..., 3, :K] = results[..., 3 * K + 1 : 4 * K + 1] # exp digits
+        stacked[..., 4, :K] = results[..., 4 * K + 1 : 5 * K + 1] # div digits
 
-        valid = op_indices >= 0  # [B]
-        idx = op_indices.clamp(0, 4)
-        sel_start = starts[idx]  # [B]
-        sel_end = ends[idx]  # [B]
+        # Gather the selected operation: index dim -2 with op_indices
+        idx = op_indices.clamp(0, 4).view(B, 1, 1, 1).expand(B, S, 1, K1)
+        selected = stacked.gather(-2, idx).squeeze(-2)  # [B, S, K+1]
 
-        # Build per-batch mask [B, D] and broadcast over sequence positions
-        dim_range = torch.arange(D, device=device).unsqueeze(0)  # [1, D]
-        mask = (dim_range >= sel_start.unsqueeze(1)) & (dim_range < sel_end.unsqueeze(1))
-        mask = mask & valid.unsqueeze(1)
-
-        return results * mask.float().unsqueeze(1)  # [B, 1, D] broadcasts over S
+        # Zero out if no valid operator was found
+        valid = (op_indices >= 0).float().view(B, 1, 1)
+        return selected * valid
 
     def forward(
         self,
@@ -302,12 +305,11 @@ class ArithmeticResidualBlock(nn.Module):
         b_exp_circle = self.encode.encode_exponent(d_b)  # [B, S, m, 2]
 
         # Stage 3: Compute + CRT decode to digit vectors
-        # [B, S, 5*K+1] — clean decimal digits, not circle encodings
-        results = self._decode_to_digits(a_circle, b_circle, b_exp_circle)
+        all_results = self._decode_to_digits(a_circle, b_circle, b_exp_circle)  # [B, S, 5K+1]
 
-        # Select only the result matching the detected operator token.
-        # Eliminates the routing problem: injection carries one answer.
-        results = self._select_operation_result(results, input_ids)
+        # Select the result matching the detected operator and relocate
+        # to fixed positions [0:K+1], so injection always reads the same structure.
+        results = self._select_operation_result(all_results, input_ids)  # [B, S, K+1]
 
         # Build injection mask: only inject at '=' position and after.
         B, S = input_ids.shape

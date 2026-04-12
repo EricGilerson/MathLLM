@@ -91,6 +91,7 @@ class EvalConfig:
     num_samples_per_config: int = 200
     max_digits_range: tuple[int, int] = (1, 10)
     max_new_tokens: int = 20
+    batch_size: int = 64
 
 
 @dataclass

@@ -135,131 +135,122 @@ class TestARBModule:
 
 
 class TestOperationSelection:
-    """Tests for _select_operation_result: only the correct operation's
-    digits should survive; the other 4 operations are zeroed out."""
+    """Tests for _select_operation_result: extracts the correct operation's
+    digits into fixed positions [0:K] with sign bit at [K]."""
 
-    def _get_result_slices(self, K: int) -> dict[str, tuple[int, int]]:
-        """Return (start, end) for each operation in the 5K+1 result vector."""
-        return {
-            "add": (0, K),
-            "sub": (K, 2 * K + 1),
-            "mul": (2 * K + 1, 3 * K + 1),
-            "exp": (3 * K + 1, 4 * K + 1),
-            "div": (4 * K + 1, 5 * K + 1),
-        }
+    def _build_fake_results(self, K: int) -> torch.Tensor:
+        """Build a [1, 1, 5K+1] tensor with distinct values per operation.
 
-    def test_add_keeps_only_add_result(self):
-        """With a '+' operator, only the add slice should be non-zero."""
-        arb = _build_test_arb(with_op_selection=True)
-        K = arb.num_digits  # 10
+        add=[1,1,...], sub=[2,2,...,sign=0.5], mul=[3,3,...], exp=[4,4,...], div=[5,5,...]
+        """
         D = 5 * K + 1
-        slices = self._get_result_slices(K)
-
-        # Fake results: fill each operation slice with its index+1 so they're distinct
         results = torch.zeros(1, 1, D)
-        for i, (name, (s, e)) in enumerate(slices.items()):
-            results[0, 0, s:e] = float(i + 1)
+        results[0, 0, 0:K] = 1.0                    # add
+        results[0, 0, K:2 * K] = 2.0                # sub digits
+        results[0, 0, 2 * K] = 0.5                  # sub sign bit
+        results[0, 0, 2 * K + 1:3 * K + 1] = 3.0   # mul
+        results[0, 0, 3 * K + 1:4 * K + 1] = 4.0   # exp
+        results[0, 0, 4 * K + 1:5 * K + 1] = 5.0   # div
+        return results
 
-        # Token IDs: "25 + 50 =" → [25, 10(+), 50, 28(=)]
+    def test_output_shape_is_K_plus_1(self):
+        """Output should be [B, S, K+1] regardless of operation."""
+        arb = _build_test_arb(with_op_selection=True)
+        K = arb.num_digits
+        D = 5 * K + 1
+        results = torch.ones(2, 3, D)
+        ids = torch.tensor([
+            [5, _OP_TOKENS['+'], 3, 28],
+            [9, _OP_TOKENS['-'], 3, 28],
+        ])
+        selected = arb._select_operation_result(results, ids)
+        assert selected.shape == (2, 3, K + 1)
+
+    def test_add_selects_add_digits(self):
+        """With '+', output should contain the add digits with sign=0."""
+        arb = _build_test_arb(with_op_selection=True)
+        K = arb.num_digits
+        results = self._build_fake_results(K)
         ids = torch.tensor([[25, _OP_TOKENS['+'], 50, 28]])
-        masked = arb._select_operation_result(results, ids)
+        selected = arb._select_operation_result(results, ids)
 
-        s, e = slices["add"]
-        assert masked[0, 0, s:e].abs().sum() > 0, "add slice should be kept"
-        # Everything outside the add slice should be zero
-        outside = torch.cat([masked[0, 0, :s], masked[0, 0, e:]])
-        assert outside.abs().sum() == 0, "non-add slices should be zeroed"
+        assert (selected[0, 0, :K] == 1.0).all(), "digits should be add values"
+        assert selected[0, 0, K].item() == 0.0, "sign bit should be 0 for add"
 
-    def test_div_keeps_only_div_result(self):
-        """With a '/' operator, only the div slice should be non-zero."""
+    def test_sub_selects_sub_digits_with_sign(self):
+        """With '-', output should contain sub digits AND sign bit."""
         arb = _build_test_arb(with_op_selection=True)
         K = arb.num_digits
-        D = 5 * K + 1
-        slices = self._get_result_slices(K)
-
-        results = torch.ones(1, 1, D)
-        ids = torch.tensor([[6, _OP_TOKENS['/'], 3, 28]])
-        masked = arb._select_operation_result(results, ids)
-
-        s, e = slices["div"]
-        assert masked[0, 0, s:e].abs().sum() > 0, "div slice should be kept"
-        outside = torch.cat([masked[0, 0, :s], masked[0, 0, e:]])
-        assert outside.abs().sum() == 0, "non-div slices should be zeroed"
-
-    def test_mul_keeps_only_mul_result(self):
-        """With a '*' operator, only the mul slice should be non-zero."""
-        arb = _build_test_arb(with_op_selection=True)
-        K = arb.num_digits
-        D = 5 * K + 1
-        slices = self._get_result_slices(K)
-
-        results = torch.ones(1, 1, D)
-        ids = torch.tensor([[5, _OP_TOKENS['*'], 3, 28]])
-        masked = arb._select_operation_result(results, ids)
-
-        s, e = slices["mul"]
-        assert masked[0, 0, s:e].abs().sum() > 0, "mul slice should be kept"
-        outside = torch.cat([masked[0, 0, :s], masked[0, 0, e:]])
-        assert outside.abs().sum() == 0, "non-mul slices should be zeroed"
-
-    def test_sub_keeps_only_sub_result(self):
-        """With a '-' operator, only the sub slice (K+1 dims) should be non-zero."""
-        arb = _build_test_arb(with_op_selection=True)
-        K = arb.num_digits
-        D = 5 * K + 1
-        slices = self._get_result_slices(K)
-
-        results = torch.ones(1, 1, D)
+        results = self._build_fake_results(K)
         ids = torch.tensor([[9, _OP_TOKENS['-'], 3, 28]])
-        masked = arb._select_operation_result(results, ids)
+        selected = arb._select_operation_result(results, ids)
 
-        s, e = slices["sub"]
-        assert e - s == K + 1, "sub slice should be K+1 (includes sign bit)"
-        assert masked[0, 0, s:e].abs().sum() > 0, "sub slice should be kept"
-        outside = torch.cat([masked[0, 0, :s], masked[0, 0, e:]])
-        assert outside.abs().sum() == 0, "non-sub slices should be zeroed"
+        assert (selected[0, 0, :K] == 2.0).all(), "digits should be sub values"
+        assert selected[0, 0, K].item() == 0.5, "sign bit should be sub's sign (0.5)"
+
+    def test_mul_selects_mul_digits(self):
+        """With '*', output should contain mul digits with sign=0."""
+        arb = _build_test_arb(with_op_selection=True)
+        K = arb.num_digits
+        results = self._build_fake_results(K)
+        ids = torch.tensor([[5, _OP_TOKENS['*'], 3, 28]])
+        selected = arb._select_operation_result(results, ids)
+
+        assert (selected[0, 0, :K] == 3.0).all(), "digits should be mul values"
+        assert selected[0, 0, K].item() == 0.0, "sign bit should be 0 for mul"
+
+    def test_div_selects_div_digits(self):
+        """With '/', output should contain div digits with sign=0."""
+        arb = _build_test_arb(with_op_selection=True)
+        K = arb.num_digits
+        results = self._build_fake_results(K)
+        ids = torch.tensor([[6, _OP_TOKENS['/'], 3, 28]])
+        selected = arb._select_operation_result(results, ids)
+
+        assert (selected[0, 0, :K] == 5.0).all(), "digits should be div values"
+        assert selected[0, 0, K].item() == 0.0, "sign bit should be 0 for div"
+
+    def test_exp_selects_exp_digits(self):
+        """With '^', output should contain exp digits with sign=0."""
+        arb = _build_test_arb(with_op_selection=True)
+        K = arb.num_digits
+        results = self._build_fake_results(K)
+        ids = torch.tensor([[2, _OP_TOKENS['^'], 7, 28]])
+        selected = arb._select_operation_result(results, ids)
+
+        assert (selected[0, 0, :K] == 4.0).all(), "digits should be exp values"
+        assert selected[0, 0, K].item() == 0.0, "sign bit should be 0 for exp"
 
     def test_batch_mixed_operators(self):
         """Different operators in a batch should each select their own result."""
         arb = _build_test_arb(with_op_selection=True)
         K = arb.num_digits
-        D = 5 * K + 1
-        slices = self._get_result_slices(K)
-
-        results = torch.ones(3, 1, D)
+        results = self._build_fake_results(K).expand(3, 1, -1).clone()
         ids = torch.tensor([
-            [5, _OP_TOKENS['+'], 3, 28],  # add
-            [6, _OP_TOKENS['*'], 2, 28],  # mul
-            [8, _OP_TOKENS['/'], 4, 28],  # div  (operand 8 is not an op token)
+            [5, _OP_TOKENS['+'], 3, 28],  # add → digits=1
+            [6, _OP_TOKENS['*'], 2, 28],  # mul → digits=3
+            [8, _OP_TOKENS['/'], 4, 28],  # div → digits=5
         ])
-        masked = arb._select_operation_result(results, ids)
+        selected = arb._select_operation_result(results, ids)
 
-        for b, expected_op in enumerate(["add", "mul", "div"]):
-            s, e = slices[expected_op]
-            assert masked[b, 0, s:e].abs().sum() > 0, \
-                f"batch {b}: {expected_op} slice should be kept"
-            outside = torch.cat([masked[b, 0, :s], masked[b, 0, e:]])
-            assert outside.abs().sum() == 0, \
-                f"batch {b}: non-{expected_op} slices should be zeroed"
+        assert (selected[0, 0, :K] == 1.0).all(), "batch 0: add digits"
+        assert (selected[1, 0, :K] == 3.0).all(), "batch 1: mul digits"
+        assert (selected[2, 0, :K] == 5.0).all(), "batch 2: div digits"
 
     def test_no_operator_zeros_everything(self):
         """If no operator token is found, all results should be zeroed."""
         arb = _build_test_arb(with_op_selection=True)
         K = arb.num_digits
-        D = 5 * K + 1
-
-        results = torch.ones(1, 1, D)
-        # Token IDs with no operator
+        results = self._build_fake_results(K)
         ids = torch.tensor([[25, 30, 50, 28]])
-        masked = arb._select_operation_result(results, ids)
-        assert masked.abs().sum() == 0, "no operator → all results zeroed"
+        selected = arb._select_operation_result(results, ids)
+        assert selected.abs().sum() == 0, "no operator → all results zeroed"
 
     def test_selection_used_in_forward(self):
-        """Full forward pass should inject only the selected operation's result."""
+        """Full forward pass should produce K+1 dim results before injection."""
         arb = _build_test_arb(with_op_selection=True)
         arb.eval()
         K = arb.num_digits
-        slices = self._get_result_slices(K)
 
         with torch.no_grad():
             arb.inject.projection.weight.fill_(0.01)
@@ -267,40 +258,29 @@ class TestOperationSelection:
         h = torch.randn(2, 4, 64)
         ids = torch.tensor([
             [25, _OP_TOKENS['+'], 50, 28],  # add
-            [ 6, _OP_TOKENS['/'],  3, 28],  # div  (token 6 is not an op token)
+            [ 6, _OP_TOKENS['/'],  3, 28],  # div
         ])
 
-        # Intercept results after selection by monkey-patching _decode_to_digits
+        # Intercept the selected results
         captured = {}
-        original_decode = arb._decode_to_digits
+        original_select = arb._select_operation_result
 
-        def capturing_decode(*args, **kwargs):
-            result = original_decode(*args, **kwargs)
-            # Apply the same selection the forward() will apply
-            selected = arb._select_operation_result(result, ids)
-            captured["pre_selection"] = result.clone()
-            captured["post_selection"] = selected.clone()
-            return result  # forward() will apply selection itself
+        def capturing_select(results, input_ids):
+            selected = original_select(results, input_ids)
+            captured["all_results"] = results.clone()
+            captured["selected"] = selected.clone()
+            return selected
 
-        arb._decode_to_digits = capturing_decode
+        arb._select_operation_result = capturing_select
         arb(h, ids)
-        arb._decode_to_digits = original_decode
+        arb._select_operation_result = original_select
 
-        pre = captured["pre_selection"]
-        post = captured["post_selection"]
-
-        # Batch 0 (+): only add slice should survive
-        s, e = slices["add"]
-        assert post[0, 0, s:e].abs().sum() > 0
-        outside = torch.cat([post[0, 0, :s], post[0, 0, e:]])
-        assert outside.abs().sum() == 0
-
-        # Batch 1 (/): only div slice should survive
-        s, e = slices["div"]
-        assert post[1, 0, s:e].abs().sum() > 0
-        outside = torch.cat([post[1, 0, :s], post[1, 0, e:]])
-        assert outside.abs().sum() == 0
-
-        # Pre-selection should have had non-zero values in other slices
-        assert pre[0].abs().sum() > post[0].abs().sum(), \
-            "selection should have removed some non-zero values"
+        assert captured["all_results"].shape[-1] == 5 * K + 1, \
+            "pre-selection should be 5K+1"
+        assert captured["selected"].shape[-1] == K + 1, \
+            "post-selection should be K+1"
+        # Add and div should have selected different digit values
+        assert not torch.allclose(
+            captured["selected"][0, 0, :K],
+            captured["selected"][1, 0, :K],
+        ), "different operations should produce different selected digits"

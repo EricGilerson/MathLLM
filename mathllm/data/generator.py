@@ -95,10 +95,19 @@ class ArithmeticDataGenerator:
         self.max_value = config.max_value
         self.max_result = config.max_result if config.max_result > 0 else config.max_value
 
+    def _sample_num_digits(self) -> int:
+        """Pick a digit count, respecting digit_weights if configured."""
+        weights = self.config.digit_weights
+        if weights:
+            return self.rng.choices(
+                range(1, self.config.max_digits + 1), weights=weights,
+            )[0]
+        return self.rng.randint(1, self.config.max_digits)
+
     def _sample_operands(self, num_digits: int | None = None) -> tuple[int, int]:
         """Sample two operands with controlled digit count."""
         if num_digits is None:
-            num_digits = self.rng.randint(1, self.config.max_digits)
+            num_digits = self._sample_num_digits()
         low = 10 ** (num_digits - 1) if num_digits > 1 else 0
         high = 10**num_digits - 1
         return self.rng.randint(low, high), self.rng.randint(low, high)
@@ -590,8 +599,8 @@ class ArithmeticDataGenerator:
         return ArithmeticRecord(text=f"{a}-{b}={result}\n", op_type="sub", operand_a=a, operand_b=b, result=result)
 
     def _generate_pure_multiplication(self) -> ArithmeticRecord | None:
-        d1 = self.rng.randint(1, min(5, self.config.max_digits))
-        d2 = self.rng.randint(1, min(5, self.config.max_digits))
+        d1 = self._sample_num_digits()
+        d2 = self._sample_num_digits()
         low1 = 10 ** (d1 - 1) if d1 > 1 else 0
         low2 = 10 ** (d2 - 1) if d2 > 1 else 0
         a = self.rng.randint(low1, 10**d1 - 1)
@@ -614,13 +623,12 @@ class ArithmeticDataGenerator:
         return ArithmeticRecord(text=f"{a}^{b}={result}\n", op_type="exp", operand_a=a, operand_b=b, result=result)
 
     def _generate_pure_division(self) -> ArithmeticRecord | None:
-        # Sample divisor and quotient with balanced digit counts (like add/sub/mul)
-        # so the training distribution matches evaluation across all digit ranges.
-        b_digits = self.rng.randint(1, self.config.max_digits)
+        # Sample divisor and quotient with the same digit distribution as other ops.
+        b_digits = self._sample_num_digits()
         b_low = 10 ** (b_digits - 1) if b_digits > 1 else 1
         b = self.rng.randint(b_low, 10 ** b_digits - 1)
 
-        q_digits = self.rng.randint(1, self.config.max_digits)
+        q_digits = self._sample_num_digits()
         q_low = 10 ** (q_digits - 1) if q_digits > 1 else 1
         quotient = self.rng.randint(q_low, 10 ** q_digits - 1)
 

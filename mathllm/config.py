@@ -49,6 +49,7 @@ class DataConfig:
     seed: int = 42
     output_dir: str = "data/"
     pure_arithmetic: bool = False  # Generate only "A op B = C" format
+    digit_weights: tuple[float, ...] = ()  # Sampling weights for 1,2,...,max_digits (empty = uniform)
     retention_data_path: str = ""  # Path to plain text or JSONL for language retention
     retention_count: int = 0  # Max retention examples to sample (0 = use all)
 

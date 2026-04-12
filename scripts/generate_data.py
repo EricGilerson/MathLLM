@@ -39,6 +39,24 @@ def main():
     aux_count = sum(1 for ex in examples if ex.operand_a is not None)
     logger.info(f"  Examples with aux targets: {aux_count}/{len(examples)}")
 
+    # Show digit distribution and operation breakdown if digit_weights are configured
+    if config.data.digit_weights:
+        from collections import Counter
+        op_counts = Counter()
+        digit_counts = Counter()
+        for ex in examples:
+            if ex.operand_a is not None:
+                op_counts[ex.op_type] += 1
+                max_op = max(len(str(abs(ex.operand_a))), len(str(abs(ex.operand_b))))
+                digit_counts[max_op] += 1
+        total = sum(digit_counts.values()) or 1
+        logger.info(f"\nDigit distribution (weights={list(config.data.digit_weights)}):")
+        for d in sorted(digit_counts):
+            logger.info(f"  {d}-digit: {digit_counts[d]/total:.1%} ({digit_counts[d]})")
+        logger.info("Operation breakdown:")
+        for op in sorted(op_counts):
+            logger.info(f"  {op}: {op_counts[op]}")
+
     # Print a few samples
     logger.info("\nSample examples:")
     for ex in examples[:10]:

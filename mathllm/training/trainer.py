@@ -129,10 +129,10 @@ class ARBTrainer:
         self._current_phase = phase
 
         # Extraction is deterministic — ensure its params are frozen
-        for arb in self.model.arbs.values():
-            for p in arb.extract.parameters():
-                p.requires_grad = False
-            for p in arb.inject.parameters():
+        for p in self.model.compute_core.extract.parameters():
+            p.requires_grad = False
+        for injector in self.model.injectors.values():
+            for p in injector.inject.parameters():
                 p.requires_grad = True
 
         # Reset early stopping on phase transitions
@@ -646,7 +646,13 @@ class ARBTrainer:
 
     def _checkpoint_payload(self) -> dict[str, object]:
         """Build the full checkpoint payload."""
-        arb_state = {key: arb.state_dict() for key, arb in self.model.arbs.items()}
+        arb_state = {
+            "compute_core": self.model.compute_core.state_dict(),
+            "injectors": {
+                key: inj.state_dict()
+                for key, inj in self.model.injectors.items()
+            },
+        }
         payload = {
             "arb_state": arb_state,
             "optimizer": self.optimizer.state_dict(),
@@ -682,11 +688,63 @@ class ARBTrainer:
 
         logger.info(f"  Checkpoint saved: {path}")
 
+    @staticmethod
+    def _migrate_legacy_arb_state(arb_state: dict) -> dict:
+        """Convert old per-layer full-ARB checkpoint to new core+injectors format.
+
+        Old format: {"24": {extract.*, encode.*, compute.*, inject.*, ...}, ...}
+        New format: {"compute_core": {...}, "injectors": {"24": {...}, ...}}
+        """
+        first_value = next(iter(arb_state.values()))
+        if isinstance(first_value, dict) and any(
+            k.startswith("extract.") or k.startswith("core.extract.")
+            for k in first_value
+        ):
+            # Legacy format detected — migrate
+            first_key = next(iter(arb_state))
+            first_state = arb_state[first_key]
+
+            # Check if it's the deprecated wrapper format (keys start with "core.")
+            has_core_prefix = any(k.startswith("core.") for k in first_state)
+
+            if has_core_prefix:
+                core_state = {
+                    k.removeprefix("core."): v for k, v in first_state.items()
+                    if k.startswith("core.")
+                }
+                injector_states = {}
+                for layer_key, state in arb_state.items():
+                    inj_state = {
+                        k.removeprefix("injector."): v
+                        for k, v in state.items()
+                        if k.startswith("injector.")
+                    }
+                    injector_states[layer_key] = inj_state
+            else:
+                core_state = {
+                    k: v for k, v in first_state.items()
+                    if k.startswith(("extract.", "encode.", "compute."))
+                }
+                injector_states = {}
+                for layer_key, state in arb_state.items():
+                    inj_state = {
+                        k: v for k, v in state.items()
+                        if k.startswith(("inject.", "answer_pos_embed."))
+                    }
+                    injector_states[layer_key] = inj_state
+
+            logger.info("Migrated legacy ARB checkpoint to compute_core + injectors format")
+            return {"compute_core": core_state, "injectors": injector_states}
+
+        return arb_state
+
     def load_checkpoint(self, path: str | Path) -> None:
         """Load a checkpoint and restore training progress."""
         ckpt = torch.load(path, map_location=self.device, weights_only=False)
-        for key, state in ckpt["arb_state"].items():
-            self.model.arbs[key].load_state_dict(state)
+        arb_state = self._migrate_legacy_arb_state(ckpt["arb_state"])
+        self.model.compute_core.load_state_dict(arb_state["compute_core"], strict=False)
+        for key, state in arb_state["injectors"].items():
+            self.model.injectors[key].load_state_dict(state, strict=False)
 
         # Restore LoRA state if present
         if "lora_state" in ckpt and hasattr(self.model, "lora_head") and self.model.lora_head is not None:

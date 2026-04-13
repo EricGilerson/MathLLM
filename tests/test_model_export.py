@@ -168,12 +168,11 @@ class TestModelExport:
         )
 
         assert isinstance(reloaded_tokenizer, FakeTokenizer)
-        for key in model.arbs.keys():
-            torch.testing.assert_close(
-                model.arbs[key].extract.token_digit_value,
-                reloaded_model.arbs[key].extract.token_digit_value,
-            )
-            torch.testing.assert_close(
-                model.arbs[key].extract.is_operator,
-                reloaded_model.arbs[key].extract.is_operator,
-            )
+        torch.testing.assert_close(
+            model.compute_core.extract.token_digit_value,
+            reloaded_model.compute_core.extract.token_digit_value,
+        )
+        torch.testing.assert_close(
+            model.compute_core.extract.is_operator,
+            reloaded_model.compute_core.extract.is_operator,
+        )

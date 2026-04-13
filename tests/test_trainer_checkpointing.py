@@ -46,13 +46,23 @@ class _DummySubModule(nn.Module):
         self.dropout = nn.Dropout(0.1)
 
 
-class DummyARB(nn.Module):
-    """Minimal trainable block that exposes a state_dict."""
+class DummyComputeCore(nn.Module):
+    """Minimal compute core with loadable state."""
+
+    def __init__(self):
+        super().__init__()
+        self.extract = _DummySubModule()
+
+    class _DummyExtract:
+        pass
+
+
+class DummyInjector(nn.Module):
+    """Minimal injector with loadable state."""
 
     def __init__(self):
         super().__init__()
         self.scale = nn.Parameter(torch.tensor(0.5))
-        self.extract = _DummySubModule()
         self.inject = _DummySubModule()
 
 
@@ -61,15 +71,19 @@ class DummyModel(nn.Module):
 
     def __init__(self):
         super().__init__()
-        self.arbs = nn.ModuleDict({"layer_0": DummyARB()})
+        self.compute_core = DummyComputeCore()
+        self.injectors = nn.ModuleDict({"layer_0": DummyInjector()})
         # Provide config.arb.dropout for phase dropout control
         self.config = _SimpleNamespace(arb=_SimpleNamespace(dropout=0.1))
 
     def get_trainable_parameters(self):
-        return list(self.arbs.parameters())
+        params = list(self.compute_core.parameters())
+        for inj in self.injectors.values():
+            params.extend(inj.parameters())
+        return params
 
     def forward(self, input_ids, attention_mask=None, labels=None):
-        scale = self.arbs["layer_0"].scale
+        scale = self.injectors["layer_0"].scale
         prediction = input_ids.float() * scale
         target = labels.float()
         mask = attention_mask.float()
@@ -163,8 +177,8 @@ class TestTrainerCheckpointing:
             reloaded_state["state"][reloaded_param_id]["exp_avg_sq"],
         )
         torch.testing.assert_close(
-            trainer.model.arbs["layer_0"].scale.detach(),
-            reloaded.model.arbs["layer_0"].scale.detach(),
+            trainer.model.injectors["layer_0"].scale.detach(),
+            reloaded.model.injectors["layer_0"].scale.detach(),
         )
         assert random.random() == expected_python
         torch.testing.assert_close(torch.rand(1), expected_torch)
@@ -217,6 +231,6 @@ class TestTrainerCheckpointing:
         assert continuous_trainer.global_step == 4
         assert resumed_trainer.global_step == 4
         torch.testing.assert_close(
-            continuous_model.arbs["layer_0"].scale.detach(),
-            resumed_model.arbs["layer_0"].scale.detach(),
+            continuous_model.injectors["layer_0"].scale.detach(),
+            resumed_model.injectors["layer_0"].scale.detach(),
         )

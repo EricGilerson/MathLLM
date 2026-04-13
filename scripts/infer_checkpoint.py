@@ -18,7 +18,7 @@ from transformers import AutoTokenizer
 from mathllm.config import Config, load_config
 from mathllm.model.gpt2_arb import GPT2WithARB
 from mathllm.model.utils import get_device
-from mathllm.training.trainer import find_latest_checkpoint
+from mathllm.training.trainer import ARBTrainer, find_latest_checkpoint
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -186,8 +186,10 @@ def load_checkpointed_model(
     model = GPT2WithARB(config)
     model.build_token_digit_tables(tokenizer)
     ckpt = torch.load(resolved_checkpoint, map_location=device, weights_only=False)
-    for key, state in ckpt["arb_state"].items():
-        model.arbs[key].load_state_dict(state, strict=False)
+    arb_state = ARBTrainer._migrate_legacy_arb_state(ckpt["arb_state"])
+    model.compute_core.load_state_dict(arb_state["compute_core"], strict=False)
+    for key, state in arb_state["injectors"].items():
+        model.injectors[key].load_state_dict(state, strict=False)
     if "lora_state" in ckpt and model.lora_head is not None:
         model.lora_head.load_state_dict(ckpt["lora_state"])
     if "lora_layers_state" in ckpt and model.lora_layers is not None:

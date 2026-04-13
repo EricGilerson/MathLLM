@@ -32,7 +32,7 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-from mathllm.arb.arb_module import ArithmeticResidualBlock
+from mathllm.arb.arb_module import ARBComputeCore, ARBInjector, ComputeResult
 from mathllm.config import Config, load_config, save_config
 from mathllm.model.lora import LoRALinear
 from mathllm.model.utils import freeze_parameters
@@ -143,24 +143,31 @@ class TransformerWithARB(nn.Module):
         else:
             self._setup_llama()
 
-        # Create ARBs at specified layer positions
+        # Single shared compute core (stages 1-3)
         self.arb_positions = set(config.arb.layer_positions)
-        self.arbs = nn.ModuleDict()
+        self.compute_core = ARBComputeCore(
+            hidden_dim=self.hidden_dim,
+            primes=config.rns.primes,
+            num_digits=config.rns.num_digit_slots,
+            num_results=config.arb.num_results,
+            softmax_temperature=config.arb.softmax_temperature,
+            num_classes=config.arb.extraction_num_classes,
+            mlp_hidden=config.arb.extraction_mlp_hidden,
+            dropout=config.arb.dropout,
+            use_attention=config.arb.extraction_use_attention,
+            attn_rank=config.arb.extraction_attn_rank,
+            eq_token_id=self._eq_token_id,
+        )
+
+        # Per-layer injectors (stage 4)
+        self.injectors = nn.ModuleDict()
         for pos in config.arb.layer_positions:
-            self.arbs[str(pos)] = ArithmeticResidualBlock(
+            self.injectors[str(pos)] = ARBInjector(
                 hidden_dim=self.hidden_dim,
-                primes=config.rns.primes,
                 num_digits=config.rns.num_digit_slots,
-                num_results=config.arb.num_results,
-                softmax_temperature=config.arb.softmax_temperature,
                 dropout=config.arb.dropout,
                 injector_init_std=config.arb.injector_init_std,
                 gate_init_logit=config.arb.gate_init_logit,
-                num_classes=config.arb.extraction_num_classes,
-                mlp_hidden=config.arb.extraction_mlp_hidden,
-                use_attention=config.arb.extraction_use_attention,
-                attn_rank=config.arb.extraction_attn_rank,
-                eq_token_id=self._eq_token_id,
                 injection_pos_dim=config.arb.injection_pos_dim,
                 injection_mlp_hidden=config.arb.injection_mlp_hidden,
             )
@@ -244,16 +251,21 @@ class TransformerWithARB(nn.Module):
     # Public helpers
     # ------------------------------------------------------------------
 
+    @property
+    def arbs(self) -> nn.ModuleDict:
+        """Backward-compat: expose injectors as 'arbs' for external code."""
+        return self.injectors
+
     def set_eq_token_id(self, eq_token_id: int) -> None:
-        """Update the '=' token ID on all ARBs."""
+        """Update the '=' token ID on compute core."""
         self._eq_token_id = eq_token_id
-        for arb in self.arbs.values():
-            arb.eq_token_id = eq_token_id
+        self.compute_core.eq_token_id = eq_token_id
 
     def build_token_digit_tables(self, tokenizer) -> None:
-        """Build frozen digit lookup tables in all ARB extractors.
+        """Build frozen digit lookup tables in the compute core extractor.
 
-        Also auto-detects the '=' token ID from the tokenizer.
+        Also auto-detects the '=' token ID and shares the digit lookup
+        buffer with each injector for smart activation masking.
         """
         # Auto-detect eq_token_id from tokenizer
         eq_ids = tokenizer.encode("=", add_special_tokens=False)
@@ -261,18 +273,22 @@ class TransformerWithARB(nn.Module):
             self.set_eq_token_id(eq_ids[0])
             logger.info("Auto-detected eq_token_id=%d from tokenizer", eq_ids[0])
 
-        for key, arb in self.arbs.items():
-            arb.extract.build_token_digits_table(tokenizer)
+        self.compute_core.extract.build_token_digits_table(tokenizer)
+
+        # Share the digit lookup buffer with each injector for smart mask
+        digit_buf = self.compute_core.extract.token_digit_value
+        for injector in self.injectors.values():
+            injector.set_token_digit_value(digit_buf)
+
         logger.info(
-            "Built token digit tables for %d ARBs (vocab_size=%d)",
-            len(self.arbs),
+            "Built token digit tables for compute core + %d injectors (vocab_size=%d)",
+            len(self.injectors),
             tokenizer.vocab_size,
         )
 
     def prepare_for_device(self, device: torch.device | str) -> None:
         """Warm runtime-only buffers that are not registered module state."""
-        for arb in self.arbs.values():
-            arb.prepare_for_device(device)
+        self.compute_core.prepare_for_device(device)
 
     def _compute_lora_gate(self, input_ids: Tensor) -> Tensor | None:
         """Compute per-position LoRA gate based on '=' token position.
@@ -393,7 +409,18 @@ class TransformerWithARB(nn.Module):
             and last_arb_pos >= 0
         )
 
-        # Iterate through transformer blocks, inserting ARBs
+        # Run compute core ONCE — shared across all injection layers
+        cr = self.compute_core(input_ids, attention_mask)
+
+        # Determine generation offset for cached path (step 2+)
+        gen_offset = None
+        if (self.compute_core._generation_mode
+                and self.compute_core._cached_results is not None
+                and cr.results.shape[1] == 1 and seq_len == 1):
+            gen_offset = self.compute_core.generation_offset
+            self.compute_core.advance_generation_offset()
+
+        # Iterate through transformer blocks, inserting injectors
         presents = []
         arb_extractions: dict[int, tuple[Tensor, Tensor, Tensor]] = {}
         for i, block in enumerate(transformer.h):
@@ -415,23 +442,25 @@ class TransformerWithARB(nn.Module):
             if use_cache and not use_dynamic_cache:
                 presents.append(block_output[1])
 
-            # Insert ARB after this layer if configured
-            # (skip the last ARB if it will be deferred to after norm)
+            # Insert injector after this layer if configured
+            # (skip the last if it will be deferred to after norm)
             if i in self.arb_positions and not (defer_last and i == last_arb_pos):
-                hidden_states, d_a, d_b, answer = self.arbs[str(i)](
-                    hidden_states, input_ids, attention_mask
+                hidden_states = self.injectors[str(i)](
+                    hidden_states, cr.results, cr.has_eq, cr.eq_pos,
+                    input_ids, generation_offset=gen_offset,
                 )
-                arb_extractions[i] = (d_a, d_b, answer)
+                arb_extractions[i] = (cr.d_a, cr.d_b, cr.results)
 
         # Final layer norm
         hidden_states = transformer.ln_f(hidden_states)
 
         # Post-norm injection for last-layer ARB (signal not diluted by norm)
         if defer_last:
-            hidden_states, d_a, d_b, answer = self.arbs[str(last_arb_pos)](
-                hidden_states, input_ids, attention_mask
+            hidden_states = self.injectors[str(last_arb_pos)](
+                hidden_states, cr.results, cr.has_eq, cr.eq_pos,
+                input_ids, generation_offset=gen_offset,
             )
-            arb_extractions[last_arb_pos] = (d_a, d_b, answer)
+            arb_extractions[last_arb_pos] = (cr.d_a, cr.d_b, cr.results)
 
         # LM head (with optional LoRA, gated by arithmetic detection)
         lora_gate = self._compute_lora_gate(input_ids)
@@ -509,7 +538,18 @@ class TransformerWithARB(nn.Module):
             and last_arb_pos >= 0
         )
 
-        # Iterate through decoder layers, inserting ARBs
+        # Run compute core ONCE — shared across all injection layers
+        cr = self.compute_core(input_ids, attention_mask)
+
+        # Determine generation offset for cached path (step 2+)
+        gen_offset = None
+        if (self.compute_core._generation_mode
+                and self.compute_core._cached_results is not None
+                and cr.results.shape[1] == 1 and seq_len == 1):
+            gen_offset = self.compute_core.generation_offset
+            self.compute_core.advance_generation_offset()
+
+        # Iterate through decoder layers, inserting injectors
         arb_extractions: dict[int, tuple[Tensor, Tensor, Tensor]] = {}
         for i, layer in enumerate(inner_model.layers):
             layer_kwargs: dict[str, object] = {
@@ -524,29 +564,29 @@ class TransformerWithARB(nn.Module):
                 layer_kwargs["use_cache"] = True
 
             layer_output = layer(hidden_states, **layer_kwargs)
-            # Newer transformers returns a plain Tensor; older returns a tuple
             if isinstance(layer_output, tuple):
                 hidden_states = layer_output[0]
             else:
                 hidden_states = layer_output
 
-            # Insert ARB after this layer if configured
-            # (skip the last ARB if it will be deferred to after norm)
+            # Insert injector after this layer if configured
             if i in self.arb_positions and not (defer_last and i == last_arb_pos):
-                hidden_states, d_a, d_b, answer = self.arbs[str(i)](
-                    hidden_states, input_ids, attention_mask
+                hidden_states = self.injectors[str(i)](
+                    hidden_states, cr.results, cr.has_eq, cr.eq_pos,
+                    input_ids, generation_offset=gen_offset,
                 )
-                arb_extractions[i] = (d_a, d_b, answer)
+                arb_extractions[i] = (cr.d_a, cr.d_b, cr.results)
 
         # Final RMSNorm
         hidden_states = inner_model.norm(hidden_states)
 
         # Post-norm injection for last-layer ARB (signal not diluted by norm)
         if defer_last:
-            hidden_states, d_a, d_b, answer = self.arbs[str(last_arb_pos)](
-                hidden_states, input_ids, attention_mask
+            hidden_states = self.injectors[str(last_arb_pos)](
+                hidden_states, cr.results, cr.has_eq, cr.eq_pos,
+                input_ids, generation_offset=gen_offset,
             )
-            arb_extractions[last_arb_pos] = (d_a, d_b, answer)
+            arb_extractions[last_arb_pos] = (cr.d_a, cr.d_b, cr.results)
 
         # LM head (with optional LoRA, gated by arithmetic detection)
         lora_gate = self._compute_lora_gate(input_ids)
@@ -664,9 +704,8 @@ class TransformerWithARB(nn.Module):
         generated = input_ids
         cache = DynamicCache()
 
-        # Enter generation cache mode for all ARBs
-        for arb in self.arbs.values():
-            arb.enter_generation_mode()
+        # Enter generation cache mode on shared compute core
+        self.compute_core.enter_generation_mode()
 
         # Reset LoRA gate cache for generation
         self._generation_mode = True
@@ -674,8 +713,7 @@ class TransformerWithARB(nn.Module):
 
         # Get digit lookup table for dynamic gate control
         # (used to turn off LoRA/injection after answer digits end)
-        first_arb = next(iter(self.arbs.values()))
-        digit_lookup = first_arb.extract.token_digit_value  # [V], -1 = not a digit
+        digit_lookup = self.compute_core.extract.token_digit_value  # [V], -1 = not a digit
         B = input_ids.shape[0]
         device = input_ids.device
         answer_started = torch.zeros(B, dtype=torch.bool, device=device)
@@ -735,17 +773,15 @@ class TransformerWithARB(nn.Module):
                         gate[answer_ended] = 0.0
                         self._cached_lora_gate = gate.view(B, 1, 1)
                         # Turn off ARB injection for finished elements
-                        for arb in self.arbs.values():
-                            if arb._cached_has_eq is not None:
-                                arb._cached_has_eq[answer_ended] = False
+                        if self.compute_core._cached_has_eq is not None:
+                            self.compute_core._cached_has_eq[answer_ended] = False
 
                 # Stop at EOS token
                 if (next_token == self.base_model.config.eos_token_id).all():
                     break
         finally:
             # Always exit generation mode to clean up cached state
-            for arb in self.arbs.values():
-                arb.exit_generation_mode()
+            self.compute_core.exit_generation_mode()
             self._generation_mode = False
             self._cached_lora_gate = None
 
@@ -754,8 +790,11 @@ class TransformerWithARB(nn.Module):
     def get_trainable_parameters(self) -> list[nn.Parameter]:
         """Return only the ARB learned parameters (and LoRA if active) for optimization."""
         params = []
-        for arb in self.arbs.values():
-            params.extend(p for p in arb.parameters() if p.requires_grad)
+        # Compute core has trainable extraction params
+        params.extend(p for p in self.compute_core.parameters() if p.requires_grad)
+        # Each injector has trainable W_proj + position embeddings
+        for inj in self.injectors.values():
+            params.extend(p for p in inj.parameters() if p.requires_grad)
         if self.lora_head is not None:
             params.extend(p for p in self.lora_head.parameters() if p.requires_grad)
         if self.lora_layers is not None:
@@ -804,7 +843,7 @@ class TransformerWithARB(nn.Module):
         eq_token_id = eq_ids[0] if eq_ids else 28
 
         model = cls(config, base_model=base_model, eq_token_id=eq_token_id)
-        if hasattr(model, "arbs") and len(model.arbs) > 0:
+        if hasattr(model, "injectors") and len(model.injectors) > 0:
             model.build_token_digit_tables(tokenizer)
         state_dict = torch.load(
             output_dir / EXPORT_STATE_FILENAME,

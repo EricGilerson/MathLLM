@@ -262,9 +262,9 @@ class TestOperationSelection:
             [ 6, _OP_TOKENS['/'],  3, 28],  # div
         ])
 
-        # Intercept the selected results
+        # Intercept the selected results (patch on the core, not the wrapper)
         captured = {}
-        original_select = arb._select_operation_result
+        original_select = arb.core._select_operation_result
 
         def capturing_select(results, input_ids):
             selected = original_select(results, input_ids)
@@ -272,9 +272,9 @@ class TestOperationSelection:
             captured["selected"] = selected.clone()
             return selected
 
-        arb._select_operation_result = capturing_select
+        arb.core._select_operation_result = capturing_select
         arb(h, ids)
-        arb._select_operation_result = original_select
+        arb.core._select_operation_result = original_select
 
         assert captured["all_results"].shape[-1] == 5 * K + 1, \
             "pre-selection should be 5K+1"

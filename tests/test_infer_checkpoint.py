@@ -21,8 +21,8 @@ class _FakeTokenizer:
         return cls()
 
 
-class _FakeARB(nn.Module):
-    """Minimal ARB submodule with loadable state."""
+class _FakeSubModule(nn.Module):
+    """Minimal submodule with loadable state."""
 
     def __init__(self):
         super().__init__()
@@ -35,7 +35,10 @@ class _FakeModel(nn.Module):
     def __init__(self, config: Config):
         super().__init__()
         self.config = config
-        self.arbs = nn.ModuleDict({"4": _FakeARB()})
+        self.compute_core = _FakeSubModule()
+        self.injectors = nn.ModuleDict({"4": _FakeSubModule()})
+        self.lora_head = None
+        self.lora_layers = None
         self.moved_to = None
 
     def build_token_digit_tables(self, tokenizer):
@@ -125,7 +128,10 @@ class TestInferCheckpointHelpers:
             infer_checkpoint.torch,
             "load",
             lambda _path, map_location=None, weights_only=False: {
-                "arb_state": {"4": {"weight": torch.tensor([2.5])}}
+                "arb_state": {
+                    "compute_core": {"weight": torch.tensor([1.5])},
+                    "injectors": {"4": {"weight": torch.tensor([2.5])}},
+                }
             },
         )
 
@@ -140,4 +146,5 @@ class TestInferCheckpointHelpers:
         assert loaded_config is config
         assert resolved == checkpoint_path
         assert model.moved_to == torch.device("cpu")
-        torch.testing.assert_close(model.arbs["4"].weight.detach(), torch.tensor([2.5]))
+        torch.testing.assert_close(model.compute_core.weight.detach(), torch.tensor([1.5]))
+        torch.testing.assert_close(model.injectors["4"].weight.detach(), torch.tensor([2.5]))

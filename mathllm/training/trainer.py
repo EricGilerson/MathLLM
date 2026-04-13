@@ -695,6 +695,10 @@ class ARBTrainer:
         Old format: {"24": {extract.*, encode.*, compute.*, inject.*, ...}, ...}
         New format: {"compute_core": {...}, "injectors": {"24": {...}, ...}}
         """
+        # Already in new format?
+        if "compute_core" in arb_state and "injectors" in arb_state:
+            return arb_state
+
         first_value = next(iter(arb_state.values()))
         if isinstance(first_value, dict) and any(
             k.startswith("extract.") or k.startswith("core.extract.")

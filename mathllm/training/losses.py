@@ -11,7 +11,7 @@ from torch import Tensor
 
 
 def compute_extraction_loss(
-    arb_extractions: dict[int, tuple[Tensor, Tensor]],
+    arb_extractions: dict[int, tuple[Tensor, Tensor, Tensor]],
     gt_digits_a: Tensor,
     gt_digits_b: Tensor,
     has_aux: Tensor,

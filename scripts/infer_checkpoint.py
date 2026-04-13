@@ -38,6 +38,8 @@ class LayerExtraction:
     digits_b: list[int]
     value_a: int
     value_b: int
+    answer_digits: list[int]
+    answer_sign: int
 
 
 def compute_expected(prompt: str) -> int | None:
@@ -74,20 +76,41 @@ def digits_to_int(digits: list[int]) -> int:
     return sum(digit * (10 ** idx) for idx, digit in enumerate(digits))
 
 
+def msb_digits_to_int(digits: list[int], sign: int) -> int | None:
+    """Reconstruct a signed integer from MSB-first digits.
+
+    Sentinel value -1 marks positions past the last significant digit.
+    Returns None if all digits are sentinel (no valid answer).
+    """
+    # Filter out sentinel padding (-1)
+    significant = [d for d in digits if d >= 0]
+    if not significant:
+        return None
+    magnitude = int("".join(str(d) for d in significant))
+    return -magnitude if sign else magnitude
+
+
 def collect_layer_extractions(
-    arb_extractions: dict[int, tuple[torch.Tensor, torch.Tensor]],
+    arb_extractions: dict[int, tuple[torch.Tensor, torch.Tensor, torch.Tensor]],
     eq_index: int,
 ) -> list[LayerExtraction]:
     """Decode deterministic digit extractions from each ARB layer.
 
-    arb_extractions contain (d_a, d_b) digit vectors [B, S, K].
+    arb_extractions contain (d_a, d_b, answer) tensors.
+    d_a, d_b are digit vectors [B, S, K].
+    answer is the computed result [B, S, K+1] (MSB-first digits + sign bit).
     All positions have the same values (broadcast), so eq_index is cosmetic.
     """
     layers: list[LayerExtraction] = []
-    for layer_id, (d_a, d_b) in sorted(arb_extractions.items()):
+    for layer_id, (d_a, d_b, answer) in sorted(arb_extractions.items()):
         # All positions have the same digits; pick eq_index for display
         digits_a = d_a[0, eq_index].long().tolist()
         digits_b = d_b[0, eq_index].long().tolist()
+
+        # Answer tensor: first K values are MSB-first digits, last is sign bit
+        answer_vec = answer[0, eq_index].long().tolist()
+        answer_digits = answer_vec[:-1]
+        answer_sign = answer_vec[-1]
 
         layers.append(
             LayerExtraction(
@@ -97,6 +120,8 @@ def collect_layer_extractions(
                 digits_b=digits_b,
                 value_a=digits_to_int(digits_a),
                 value_b=digits_to_int(digits_b),
+                answer_digits=answer_digits,
+                answer_sign=answer_sign,
             )
         )
     return layers
@@ -111,10 +136,16 @@ def format_extractions(extractions: list[LayerExtraction], op_index: int | None 
     for extraction in extractions:
         a_pos = f"op@{op_index}" if op_index is not None else f"@{extraction.token_index}"
         b_pos = f"eq@{eq_index}" if eq_index is not None else f"@{extraction.token_index}"
+        answer_val = msb_digits_to_int(extraction.answer_digits, extraction.answer_sign)
+        sign_str = "-" if extraction.answer_sign else "+"
         lines.append(
             f"  layer {extraction.layer_id}: "
             f"a({a_pos})={extraction.digits_a} val={extraction.value_a}  "
             f"b({b_pos})={extraction.digits_b} val={extraction.value_b}"
+        )
+        lines.append(
+            f"    arb_answer: {extraction.answer_digits} sign={sign_str} "
+            f"val={answer_val}"
         )
     return "\n".join(lines)
 

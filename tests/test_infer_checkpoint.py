@@ -52,14 +52,18 @@ class TestInferCheckpointHelpers:
         # 347 = [7, 4, 3], 291 = [1, 9, 2]
         d_a_layer4 = torch.tensor([[[0, 0, 0], [7, 4, 3]]], dtype=torch.float)
         d_b_layer4 = torch.tensor([[[0, 0, 0], [1, 9, 2]]], dtype=torch.float)
+        # Answer: 347 + 291 = 638, MSB-first [6, 3, 8] + sign=0
+        answer_layer4 = torch.tensor([[[0, 0, 0, 0], [6, 3, 8, 0]]], dtype=torch.float)
         # 55 = [5, 5, 0], 12 = [2, 1, 0]
         d_a_layer8 = torch.tensor([[[0, 0, 0], [5, 5, 0]]], dtype=torch.float)
         d_b_layer8 = torch.tensor([[[0, 0, 0], [2, 1, 0]]], dtype=torch.float)
+        # Answer: 55 + 12 = 67, MSB-first [6, 7, -1] + sign=0
+        answer_layer8 = torch.tensor([[[0, 0, 0, 0], [6, 7, -1, 0]]], dtype=torch.float)
 
         extractions = infer_checkpoint.collect_layer_extractions(
             {
-                8: (d_a_layer8, d_b_layer8),
-                4: (d_a_layer4, d_b_layer4),
+                8: (d_a_layer8, d_b_layer8, answer_layer8),
+                4: (d_a_layer4, d_b_layer4, answer_layer4),
             },
             eq_index=1,
         )
@@ -69,8 +73,12 @@ class TestInferCheckpointHelpers:
         assert extractions[0].digits_b == [1, 9, 2]
         assert extractions[0].value_a == 347
         assert extractions[0].value_b == 291
+        assert extractions[0].answer_digits == [6, 3, 8]
+        assert extractions[0].answer_sign == 0
         assert extractions[1].value_a == 55
         assert extractions[1].value_b == 12
+        assert extractions[1].answer_digits == [6, 7, -1]
+        assert extractions[1].answer_sign == 0
 
     def test_format_extractions_renders_compact_summary(self):
         formatted = infer_checkpoint.format_extractions(
@@ -82,6 +90,8 @@ class TestInferCheckpointHelpers:
                     digits_b=[1, 9, 2, 0],
                     value_a=347,
                     value_b=291,
+                    answer_digits=[6, 3, 8, -1],
+                    answer_sign=0,
                 )
             ]
         )

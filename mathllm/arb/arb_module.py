@@ -142,7 +142,7 @@ class ArithmeticResidualBlock(nn.Module):
         self._cached_has_eq = None
         self._generation_offset = 0
 
-    def _forward_generation_cached(self, h: Tensor) -> tuple[Tensor, Tensor, Tensor]:
+    def _forward_generation_cached(self, h: Tensor) -> tuple[Tensor, Tensor, Tensor, Tensor]:
         """Forward pass during generation using cached arithmetic results.
 
         Called on step 2+ when only the last generated token is passed.
@@ -153,8 +153,11 @@ class ArithmeticResidualBlock(nn.Module):
         K = self.num_digits
         device = h.device
 
+        # The cached answer digits (before position embedding concatenation)
+        answer = self._cached_results.unsqueeze(1)  # [B, 1, K+1]
+
         # Expand cached results to [B, 1, D]
-        results = self._cached_results.unsqueeze(1)
+        results = answer.clone()
 
         # Add position embedding for current answer offset
         if self.answer_pos_embed is not None:
@@ -176,7 +179,7 @@ class ArithmeticResidualBlock(nn.Module):
         # Dummy extractions (not used during generation)
         d_a = torch.zeros(B, 1, K, device=device)
         d_b = torch.zeros(B, 1, K, device=device)
-        return h_prime, d_a, d_b
+        return h_prime, d_a, d_b, answer
 
     def prepare_for_device(self, device: torch.device | str) -> None:
         """Warm runtime-only frozen buffers after the module is moved."""
@@ -330,7 +333,7 @@ class ArithmeticResidualBlock(nn.Module):
         h: Tensor,
         input_ids: Tensor,
         attention_mask: Tensor | None = None,
-    ) -> tuple[Tensor, Tensor, Tensor]:
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
         """Run the full ARB on the hidden state.
 
         Args:
@@ -342,6 +345,7 @@ class ArithmeticResidualBlock(nn.Module):
             h': [batch, seq_len, hidden_dim] — h + delta_h from arithmetic
             d_a: [batch, seq_len, num_digits] — extracted digit vector for operand A
             d_b: [batch, seq_len, num_digits] — extracted digit vector for operand B
+            answer: [batch, seq_len, num_digits+1] — computed answer digits (MSB-first) + sign
         """
         # Generation cache: reuse cached results on step 2+
         if self._generation_mode and self._cached_results is not None:
@@ -408,7 +412,7 @@ class ArithmeticResidualBlock(nn.Module):
             # Next generation step will be at offset 1 from '='
             self._generation_offset = 1
 
-        return h_prime, d_a, d_b
+        return h_prime, d_a, d_b, results
 
     def count_parameters(self) -> dict[str, int]:
         """Count learned vs frozen parameters."""

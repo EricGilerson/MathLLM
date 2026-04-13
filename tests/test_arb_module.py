@@ -51,10 +51,11 @@ class TestARBModule:
         h = torch.randn(2, 4, 64)
         # "25 + 50 =" -> tokens [25, 10(+), 50, 99(=)]
         ids = torch.tensor([[25, 10, 50, 99], [30, 12, 40, 28]])
-        h_out, d_a, d_b = arb(h, ids)
+        h_out, d_a, d_b, answer = arb(h, ids)
         assert h_out.shape == (2, 4, 64)
         assert d_a.shape == (2, 4, 10)
         assert d_b.shape == (2, 4, 10)
+        assert answer.shape == (2, 4, 11)  # K digits + sign bit
 
     def test_deterministic_extraction(self):
         """Extraction should return exact digit vectors from token IDs."""
@@ -62,7 +63,7 @@ class TestARBModule:
         h = torch.randn(1, 4, 64)
         # "25 + 50 =" -> A=25, B=50
         ids = torch.tensor([[25, 10, 50, 28]])
-        _, d_a, d_b = arb(h, ids)
+        _, d_a, d_b, _ = arb(h, ids)
         # d_a should be digits of 25: [5, 2, 0, ...] (LSB first)
         assert d_a[0, 0, 0].item() == 5  # ones digit
         assert d_a[0, 0, 1].item() == 2  # tens digit
@@ -78,7 +79,7 @@ class TestARBModule:
         )
         h = torch.randn(2, 4, 64)
         ids = torch.tensor([[25, 10, 50, 99], [30, 12, 40, 28]])
-        h_out, _, _ = arb(h, ids)
+        h_out, _, _, _ = arb(h, ids)
         assert torch.allclose(h_out, h, atol=1e-6), \
             "Zero-init ARB should produce h' = h"
 
@@ -95,7 +96,7 @@ class TestARBModule:
         h = torch.randn(2, 4, 64, requires_grad=True)
         # Use token 28 for '=' so injection mask is active
         ids = torch.tensor([[25, 10, 50, 28], [30, 12, 40, 28]])
-        h_out, _, _ = arb(h, ids)
+        h_out, _, _, _ = arb(h, ids)
         loss = h_out.sum()
         loss.backward()
 
@@ -126,9 +127,9 @@ class TestARBModule:
         ids2 = torch.tensor([[30, 12, 40, 28]])
         ids_batch = torch.cat([ids1, ids2], dim=0)
 
-        out_batch, _, _ = arb(h_batch, ids_batch)
-        out1, _, _ = arb(h1, ids1)
-        out2, _, _ = arb(h2, ids2)
+        out_batch, _, _, _ = arb(h_batch, ids_batch)
+        out1, _, _, _ = arb(h1, ids1)
+        out2, _, _, _ = arb(h2, ids2)
 
         assert torch.allclose(out_batch[0], out1[0], atol=1e-5)
         assert torch.allclose(out_batch[1], out2[0], atol=1e-5)

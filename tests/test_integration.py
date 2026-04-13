@@ -48,9 +48,10 @@ class TestModelIntegration:
         # Check extraction digit vector outputs from each ARB layer
         for pos in config.arb.layer_positions:
             assert pos in outputs["arb_extractions"]
-            d_a, d_b = outputs["arb_extractions"][pos]
+            d_a, d_b, answer = outputs["arb_extractions"][pos]
             assert d_a.shape == (1, 5, config.rns.num_digit_slots)
             assert d_b.shape == (1, 5, config.rns.num_digit_slots)
+            assert answer.shape == (1, 5, config.rns.num_digit_slots + 1)
 
     def test_zero_init_matches_base(self, config):
         """With zero W_proj, output should match unmodified GPT-2."""

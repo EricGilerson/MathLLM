@@ -395,7 +395,7 @@ class TransformerWithARB(nn.Module):
 
         # Iterate through transformer blocks, inserting ARBs
         presents = []
-        arb_extractions: dict[int, tuple[Tensor, Tensor]] = {}
+        arb_extractions: dict[int, tuple[Tensor, Tensor, Tensor]] = {}
         for i, block in enumerate(transformer.h):
             block_kwargs = {
                 "attention_mask": extended_mask,
@@ -418,20 +418,20 @@ class TransformerWithARB(nn.Module):
             # Insert ARB after this layer if configured
             # (skip the last ARB if it will be deferred to after norm)
             if i in self.arb_positions and not (defer_last and i == last_arb_pos):
-                hidden_states, d_a, d_b = self.arbs[str(i)](
+                hidden_states, d_a, d_b, answer = self.arbs[str(i)](
                     hidden_states, input_ids, attention_mask
                 )
-                arb_extractions[i] = (d_a, d_b)
+                arb_extractions[i] = (d_a, d_b, answer)
 
         # Final layer norm
         hidden_states = transformer.ln_f(hidden_states)
 
         # Post-norm injection for last-layer ARB (signal not diluted by norm)
         if defer_last:
-            hidden_states, d_a, d_b = self.arbs[str(last_arb_pos)](
+            hidden_states, d_a, d_b, answer = self.arbs[str(last_arb_pos)](
                 hidden_states, input_ids, attention_mask
             )
-            arb_extractions[last_arb_pos] = (d_a, d_b)
+            arb_extractions[last_arb_pos] = (d_a, d_b, answer)
 
         # LM head (with optional LoRA, gated by arithmetic detection)
         lora_gate = self._compute_lora_gate(input_ids)
@@ -510,7 +510,7 @@ class TransformerWithARB(nn.Module):
         )
 
         # Iterate through decoder layers, inserting ARBs
-        arb_extractions: dict[int, tuple[Tensor, Tensor]] = {}
+        arb_extractions: dict[int, tuple[Tensor, Tensor, Tensor]] = {}
         for i, layer in enumerate(inner_model.layers):
             layer_kwargs: dict[str, object] = {
                 "position_ids": position_ids,
@@ -533,20 +533,20 @@ class TransformerWithARB(nn.Module):
             # Insert ARB after this layer if configured
             # (skip the last ARB if it will be deferred to after norm)
             if i in self.arb_positions and not (defer_last and i == last_arb_pos):
-                hidden_states, d_a, d_b = self.arbs[str(i)](
+                hidden_states, d_a, d_b, answer = self.arbs[str(i)](
                     hidden_states, input_ids, attention_mask
                 )
-                arb_extractions[i] = (d_a, d_b)
+                arb_extractions[i] = (d_a, d_b, answer)
 
         # Final RMSNorm
         hidden_states = inner_model.norm(hidden_states)
 
         # Post-norm injection for last-layer ARB (signal not diluted by norm)
         if defer_last:
-            hidden_states, d_a, d_b = self.arbs[str(last_arb_pos)](
+            hidden_states, d_a, d_b, answer = self.arbs[str(last_arb_pos)](
                 hidden_states, input_ids, attention_mask
             )
-            arb_extractions[last_arb_pos] = (d_a, d_b)
+            arb_extractions[last_arb_pos] = (d_a, d_b, answer)
 
         # LM head (with optional LoRA, gated by arithmetic detection)
         lora_gate = self._compute_lora_gate(input_ids)

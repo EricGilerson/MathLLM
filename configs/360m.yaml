@@ -3,7 +3,7 @@ rns:
   num_digit_slots: 6  # handles up to 999,999 (covers 999*999=998,001)
 
 arb:
-  layer_positions: [24, 31]  # dual ARBs: mid-network + last layer
+  layer_positions: [31]  # dual ARBs: mid-network + last layer
   softmax_temperature: 1000.0
   num_results: 5
   dropout: 0.0
@@ -20,7 +20,7 @@ arb:
   lora_alpha: 32.0
 
 data:
-  num_positive: 100000
+  num_positive: 250000
   num_negative: 0
   num_edge_cases: 0
   max_digits: 3
@@ -29,6 +29,7 @@ data:
   seed: 42
   output_dir: "data_360m/"
   pure_arithmetic: true
+  digit_weights: [1.5, 3, 6.5]  # 10% 1-digit, 20% 2-digit, 70% 3-digit
 
 training:
   base_model: "HuggingFaceTB/SmolLM2-360M"

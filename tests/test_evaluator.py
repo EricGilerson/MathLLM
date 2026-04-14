@@ -217,6 +217,28 @@ class TestEvaluatorBatching:
             {"shape": (1, 6), "max_new_tokens": 3},
         ]
 
+    def test_generate_texts_caps_requested_tokens_to_eval_config(self):
+        model = FakeModel()
+        tokenizer = FakeTokenizer()
+        config = EvalConfig(batch_size=2, max_new_tokens=4)
+        evaluator = ARBEvaluator(
+            model=model,
+            tokenizer=tokenizer,
+            config=config,
+            device=torch.device("cpu"),
+        )
+
+        completions = evaluator._generate_texts(
+            ["1+1=", "2+2="],
+            max_new_tokens=[2, 10],
+        )
+
+        assert completions == ["11", "2222"]
+        assert model.generate_calls == [
+            {"shape": (1, 4), "max_new_tokens": 2},
+            {"shape": (1, 4), "max_new_tokens": 4},
+        ]
+
     def test_perplexity_test_batches_and_masks_padding(self):
         model = FakeModel()
         tokenizer = FakeTokenizer()

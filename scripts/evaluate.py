@@ -5,6 +5,7 @@ import argparse
 import json
 import logging
 import sys
+from pathlib import Path
 
 sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent.parent))
 
@@ -13,7 +14,7 @@ from transformers import AutoTokenizer
 
 from mathllm.config import load_config
 from mathllm.evaluation.evaluator import ARBEvaluator
-from mathllm.model.gpt2_arb import GPT2WithARB
+from mathllm.model.gpt2_arb import EXPORT_CONFIG_FILENAME, GPT2WithARB
 from mathllm.model.utils import get_device
 from mathllm.training.trainer import ARBTrainer
 
@@ -43,10 +44,20 @@ def main():
     device = get_device(config.training.device)
     logger.info(f"Using device: {device}")
 
-    if args.model_dir:
-        logger.info(f"Loading exported model from: {args.model_dir}")
-        model, tokenizer, config = GPT2WithARB.from_exported_model(
-            args.model_dir,
+    model_dir = args.model_dir
+    if model_dir is None and args.checkpoint is None:
+        configured_model_dir = Path(config.training.final_model_dir)
+        if configured_model_dir.is_dir() and (configured_model_dir / EXPORT_CONFIG_FILENAME).exists():
+            model_dir = str(configured_model_dir)
+            logger.info(
+                "Using exported model from config.training.final_model_dir: %s",
+                model_dir,
+            )
+
+    if model_dir:
+        logger.info(f"Loading exported model from: {model_dir}")
+        model, tokenizer, _ = GPT2WithARB.from_exported_model(
+            model_dir,
             device=device,
         )
     else:

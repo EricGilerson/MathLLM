@@ -97,6 +97,18 @@ class ARBEvaluator:
             self.model.prepare_for_device(self.device)
         self._prepared_device = self.device
 
+    def _resolve_max_new_tokens(
+        self,
+        max_new_tokens: int | list[int] | None = None,
+    ) -> int | list[int]:
+        """Apply the configured generation cap to evaluation requests."""
+        configured_max = max(1, int(self.config.max_new_tokens))
+        if isinstance(max_new_tokens, list):
+            return [max(1, min(int(tokens), configured_max)) for tokens in max_new_tokens]
+        if max_new_tokens is None:
+            return configured_max
+        return max(1, min(int(max_new_tokens), configured_max))
+
     def _generate_texts(
         self,
         prompts: list[str],
@@ -114,11 +126,12 @@ class ARBEvaluator:
         self._prepare_model()
 
         if isinstance(max_new_tokens, list):
-            if len(max_new_tokens) != len(prompts):
+            resolved_max_new_tokens = self._resolve_max_new_tokens(max_new_tokens)
+            if len(resolved_max_new_tokens) != len(prompts):
                 raise ValueError("max_new_tokens list must match prompts length")
-            max_tokens_per_prompt = max_new_tokens
+            max_tokens_per_prompt = resolved_max_new_tokens
         else:
-            max_tokens = max_new_tokens or self.config.max_new_tokens
+            max_tokens = self._resolve_max_new_tokens(max_new_tokens)
             max_tokens_per_prompt = [max_tokens] * len(prompts)
 
         grouped_requests: dict[tuple[int, int], list[tuple[int, str, torch.Tensor]]] = defaultdict(list)
@@ -400,7 +413,6 @@ class ARBEvaluator:
 
             generated_texts = self._generate_texts(
                 [prompt for prompt, _ in cases],
-                max_new_tokens=20,
             )
             correct = 0
             for (_, expected), generated in zip(cases, generated_texts):
@@ -461,7 +473,6 @@ class ARBEvaluator:
 
             generated_texts = self._generate_texts(
                 [prompt for prompt, _ in cases],
-                max_new_tokens=20,
             )
             correct = 0
             for (_, expected), generated in zip(cases, generated_texts):
@@ -629,7 +640,6 @@ class ARBEvaluator:
 
         generated_texts = self._generate_texts(
             [prompt for prompt, _ in cases],
-            max_new_tokens=10,
         )
         correct = 0
         for (_, expected), generated in zip(cases, generated_texts):

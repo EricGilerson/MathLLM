@@ -114,3 +114,79 @@ def test_evaluate_script_uses_configured_final_model_dir_by_default(monkeypatch,
 
     assert captured["model_dir"] == str(model_dir)
     assert captured["evaluation_config"] is yaml_config.evaluation
+
+
+def test_evaluate_script_base_model_only_bypasses_exported_model(monkeypatch, tmp_path):
+    module = _load_evaluate_module()
+
+    model_dir = tmp_path / "trained_model_auto"
+    model_dir.mkdir()
+    (model_dir / "config.yaml").write_text("evaluation: {}\n")
+
+    yaml_config = Config()
+    yaml_config.training.device = "cpu"
+    yaml_config.training.base_model = "test-base-model"
+    yaml_config.training.final_model_dir = str(model_dir)
+
+    captured = {}
+
+    class FakeTokenizer:
+        def __init__(self):
+            self.pad_token = None
+            self.eos_token = "<eos>"
+            self.pad_token_id = 7
+
+    class FakeHFModel:
+        def __init__(self):
+            self.config = type("Cfg", (), {"pad_token_id": None, "eos_token_id": 7})()
+
+    class FakeAutoModel:
+        @staticmethod
+        def from_pretrained(model_name):
+            captured["base_model_name"] = model_name
+            return FakeHFModel()
+
+    class FakeAutoTokenizer:
+        @staticmethod
+        def from_pretrained(model_name):
+            captured["tokenizer_name"] = model_name
+            return FakeTokenizer()
+
+    class FakeEvaluator:
+        def __init__(self, model, tokenizer, config, device=None):
+            captured["model"] = model
+            captured["tokenizer"] = tokenizer
+            captured["evaluation_config"] = config
+
+        def full_evaluation(self, eval_texts=None):
+            return {"ok": True}
+
+    monkeypatch.setattr(module, "load_config", lambda path: yaml_config)
+    monkeypatch.setattr(module, "get_device", lambda device: "cpu")
+    monkeypatch.setattr(module, "AutoTokenizer", FakeAutoTokenizer)
+    monkeypatch.setattr(module, "AutoModelForCausalLM", FakeAutoModel)
+    monkeypatch.setattr(
+        module.GPT2WithARB,
+        "from_exported_model",
+        classmethod(lambda cls, output_dir, device=None: (_ for _ in ()).throw(AssertionError("should not load exported model"))),
+    )
+    monkeypatch.setattr(module, "ARBEvaluator", FakeEvaluator)
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            str(SCRIPT_PATH),
+            "--config",
+            "configs/360m.yaml",
+            "--base-model-only",
+        ],
+    )
+
+    module.main()
+
+    assert captured["base_model_name"] == "test-base-model"
+    assert captured["tokenizer_name"] == "test-base-model"
+    assert isinstance(captured["model"], module.BaseModelEvaluatorAdapter)
+    assert captured["model"].model.config.pad_token_id == 7
+    assert captured["evaluation_config"] is yaml_config.evaluation

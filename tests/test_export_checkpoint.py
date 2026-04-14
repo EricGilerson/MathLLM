@@ -29,6 +29,24 @@ class _FakeModel:
 
 
 class TestExportCheckpoint:
+    def test_resolve_export_checkpoint_path_uses_best_checkpoint(
+        self, monkeypatch, tmp_path
+    ):
+        config = Config()
+        config.training.checkpoint_dir = str(tmp_path)
+        best_checkpoint = tmp_path / "arb_best.pt"
+        best_checkpoint.write_bytes(b"checkpoint")
+
+        monkeypatch.setattr(export_checkpoint, "load_config", lambda _path: config)
+
+        resolved = export_checkpoint.resolve_export_checkpoint_path(
+            config_path="configs/default.yaml",
+            checkpoint_path=None,
+            use_best=True,
+        )
+
+        assert resolved == str(best_checkpoint)
+
     def test_export_checkpoint_model_uses_config_final_model_dir(
         self, monkeypatch, tmp_path
     ):
@@ -94,3 +112,39 @@ class TestExportCheckpoint:
         assert config.training.final_model_dir == str(output_dir)
         assert model.saved_calls == [(output_dir, tokenizer)]
         assert (export_dir / "bundle.marker").exists()
+
+    def test_export_checkpoint_model_passes_best_checkpoint_path(
+        self, monkeypatch, tmp_path
+    ):
+        config = Config()
+        config.training.checkpoint_dir = str(tmp_path)
+        config.training.final_model_dir = str(tmp_path / "trained_model")
+        best_checkpoint = tmp_path / "arb_best.pt"
+        best_checkpoint.write_bytes(b"checkpoint")
+        model = _FakeModel()
+        tokenizer = _FakeTokenizer()
+        captured: dict[str, object] = {}
+
+        monkeypatch.setattr(export_checkpoint, "load_config", lambda _path: config)
+
+        def fake_load_checkpointed_model(config_path, checkpoint_path, device):
+            captured["checkpoint_path"] = checkpoint_path
+            return model, tokenizer, config, Path(checkpoint_path)
+
+        monkeypatch.setattr(
+            export_checkpoint,
+            "load_checkpointed_model",
+            fake_load_checkpointed_model,
+        )
+
+        export_dir, resolved_checkpoint = export_checkpoint.export_checkpoint_model(
+            config_path="configs/default.yaml",
+            checkpoint_path=None,
+            output_dir=None,
+            device=torch.device("cpu"),
+            use_best=True,
+        )
+
+        assert captured["checkpoint_path"] == str(best_checkpoint)
+        assert export_dir == Path(config.training.final_model_dir)
+        assert resolved_checkpoint == best_checkpoint

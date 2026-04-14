@@ -199,22 +199,152 @@ class ARBEvaluator:
             for digits_b in range(min_d, upper + 1)
         ]
 
+    def _new_digit_error_counts(self) -> dict[str, object]:
+        """Create an accumulator for digit-position error tracking."""
+        return {
+            "total_cases": 0,
+            "wrong_cases": 0,
+            "parsed_wrong_cases": 0,
+            "unparsed_cases": 0,
+            "sign_mismatch_cases": 0,
+            "positions": {},
+        }
+
+    def _accumulate_digit_error_counts(
+        self,
+        counts: dict[str, object],
+        expected: int,
+        extracted: str | None,
+    ) -> None:
+        """Track where integer generations go wrong using left-to-right positions."""
+        counts["total_cases"] += 1
+
+        if extracted is None:
+            counts["wrong_cases"] += 1
+            counts["unparsed_cases"] += 1
+            return
+
+        parsed_value = int(extracted)
+        if parsed_value != expected:
+            counts["wrong_cases"] += 1
+            counts["parsed_wrong_cases"] += 1
+
+        expected_negative = expected < 0
+        extracted_negative = extracted.startswith("-")
+        if expected_negative != extracted_negative:
+            counts["sign_mismatch_cases"] += 1
+
+        expected_digits = str(abs(expected))
+        extracted_digits = extracted.lstrip("-")
+        max_positions = max(len(expected_digits), len(extracted_digits))
+        position_counts: dict[int, dict[str, int]] = counts["positions"]  # type: ignore[assignment]
+
+        for position in range(max_positions):
+            expected_digit = expected_digits[position] if position < len(expected_digits) else None
+            extracted_digit = extracted_digits[position] if position < len(extracted_digits) else None
+            bucket = position_counts.setdefault(position + 1, {"evaluated": 0, "wrong": 0})
+            bucket["evaluated"] += 1
+            if expected_digit != extracted_digit:
+                bucket["wrong"] += 1
+
+    def _merge_digit_error_counts(
+        self,
+        left: dict[str, object],
+        right: dict[str, object],
+    ) -> dict[str, object]:
+        """Merge two digit-position error accumulators."""
+        left["total_cases"] += right["total_cases"]
+        left["wrong_cases"] += right["wrong_cases"]
+        left["parsed_wrong_cases"] += right["parsed_wrong_cases"]
+        left["unparsed_cases"] += right["unparsed_cases"]
+        left["sign_mismatch_cases"] += right["sign_mismatch_cases"]
+
+        left_positions: dict[int, dict[str, int]] = left["positions"]  # type: ignore[assignment]
+        right_positions: dict[int, dict[str, int]] = right["positions"]  # type: ignore[assignment]
+        for position, stats in right_positions.items():
+            bucket = left_positions.setdefault(position, {"evaluated": 0, "wrong": 0})
+            bucket["evaluated"] += stats["evaluated"]
+            bucket["wrong"] += stats["wrong"]
+        return left
+
+    def _finalize_digit_error_profile(
+        self,
+        counts: dict[str, object],
+    ) -> dict[str, object]:
+        """Convert digit-position error counts into reportable metrics."""
+        total_cases = int(counts["total_cases"])
+        wrong_cases = int(counts["wrong_cases"])
+        parsed_wrong_cases = int(counts["parsed_wrong_cases"])
+        unparsed_cases = int(counts["unparsed_cases"])
+        sign_mismatch_cases = int(counts["sign_mismatch_cases"])
+        raw_positions: dict[int, dict[str, int]] = counts["positions"]  # type: ignore[assignment]
+
+        wrong_positions_total = sum(stats["wrong"] for stats in raw_positions.values())
+        positions: dict[str, object] = {}
+        for position in sorted(raw_positions):
+            stats = raw_positions[position]
+            evaluated = stats["evaluated"]
+            wrong = stats["wrong"]
+            positions[f"position_{position}"] = {
+                "evaluated": evaluated,
+                "wrong": wrong,
+                "wrong_rate": wrong / max(evaluated, 1),
+                "share_of_wrong_positions": wrong / max(wrong_positions_total, 1),
+            }
+
+        return {
+            "position_indexing": "left_to_right",
+            "total_cases": total_cases,
+            "wrong_cases": wrong_cases,
+            "wrong_case_rate": wrong_cases / max(total_cases, 1),
+            "parsed_wrong_cases": parsed_wrong_cases,
+            "unparsed_cases": unparsed_cases,
+            "sign_mismatch_cases": sign_mismatch_cases,
+            "wrong_positions_total": wrong_positions_total,
+            "positions": positions,
+        }
+
     def _score_integer_cases(
         self,
         cases: list[tuple[str, int, int]],
-    ) -> tuple[int, int, float]:
+    ) -> dict[str, object]:
         """Generate answers for integer prompts and compute exact-match accuracy."""
         generated_texts = self._generate_texts(
             [prompt for prompt, _, _ in cases],
             [max_tokens for _, _, max_tokens in cases],
         )
         correct = 0
+        digit_error_counts = self._new_digit_error_counts()
         for (_, expected, _), generated in zip(cases, generated_texts):
             extracted = self._extract_number_from_generation(generated)
+            self._accumulate_digit_error_counts(digit_error_counts, expected, extracted)
             if extracted is not None and int(extracted) == expected:
                 correct += 1
         total = len(cases)
-        return correct, total, correct / max(total, 1)
+        return {
+            "correct": correct,
+            "total": total,
+            "accuracy": correct / max(total, 1),
+            "digit_error_profile": self._finalize_digit_error_profile(digit_error_counts),
+        }
+
+    def _log_digit_error_profile(self, label: str, profile: dict[str, object]) -> None:
+        """Log a compact summary of wrong-digit positions."""
+        positions = profile["positions"]
+        if not positions:
+            logger.info("  %s wrong-digit positions: none", label)
+            return
+
+        summary = ", ".join(
+            f"{position}={stats['wrong_rate']:.1%}"
+            for position, stats in positions.items()
+        )
+        logger.info(
+            "  %s wrong-digit positions (%s): %s",
+            label,
+            profile["position_indexing"],
+            summary,
+        )
 
     def _add_pair_metric_summaries(
         self,
@@ -258,6 +388,7 @@ class ARBEvaluator:
 
         for op in ["add", "sub", "mul"]:
             pair_results: dict[str, float] = {}
+            op_digit_error_counts = self._new_digit_error_counts()
             for digits_a, digits_b in self._digit_pairs():
                 cases: list[tuple[str, int, int]] = []
 
@@ -277,16 +408,40 @@ class ARBEvaluator:
                     prompt = f"{a}{symbol}{b}="
                     cases.append((prompt, expected, len(str(abs(expected))) + 5))
 
-                correct, total, accuracy = self._score_integer_cases(cases)
+                score = self._score_integer_cases(cases)
                 pair_key = f"{digits_a}x{digits_b}"
-                pair_results[pair_key] = accuracy
-                logger.info(f"  {op}_{pair_key}: {accuracy:.1%} ({correct}/{total})")
+                pair_results[pair_key] = score["accuracy"]
+                logger.info(
+                    f"  {op}_{pair_key}: {score['accuracy']:.1%} "
+                    f"({score['correct']}/{score['total']})"
+                )
+                self._merge_digit_error_counts(
+                    op_digit_error_counts,
+                    {
+                        "total_cases": score["digit_error_profile"]["total_cases"],
+                        "wrong_cases": score["digit_error_profile"]["wrong_cases"],
+                        "parsed_wrong_cases": score["digit_error_profile"]["parsed_wrong_cases"],
+                        "unparsed_cases": score["digit_error_profile"]["unparsed_cases"],
+                        "sign_mismatch_cases": score["digit_error_profile"]["sign_mismatch_cases"],
+                        "positions": {
+                            int(position.removeprefix("position_")): {
+                                "evaluated": stats["evaluated"],
+                                "wrong": stats["wrong"],
+                            }
+                            for position, stats in score["digit_error_profile"]["positions"].items()
+                        },
+                    },
+                )
 
                 if digits_a == digits_b:
                     legacy_key = f"{op}_{digits_a}digit"
-                    results[legacy_key] = accuracy
+                    results[legacy_key] = score["accuracy"]
 
             self._add_pair_metric_summaries(results, op, pair_results)
+            results[f"{op}_wrong_digit_distribution"] = self._finalize_digit_error_profile(
+                op_digit_error_counts
+            )
+            self._log_digit_error_profile(op, results[f"{op}_wrong_digit_distribution"])
 
         return results
 
@@ -312,9 +467,12 @@ class ARBEvaluator:
             prompt = f"{a}^{b}="
             exp_cases.append((prompt, expected, len(str(expected)) + 5))
 
-        correct, total, accuracy = self._score_integer_cases(exp_cases)
-        logger.info(f"  exp_accuracy: {accuracy:.1%} ({correct}/{total})")
-        return {"exp_accuracy": accuracy}
+        score = self._score_integer_cases(exp_cases)
+        logger.info(f"  exp_accuracy: {score['accuracy']:.1%} ({score['correct']}/{score['total']})")
+        return {
+            "exp_accuracy": score["accuracy"],
+            "exp_wrong_digit_distribution": score["digit_error_profile"],
+        }
 
     def division_accuracy(
         self,
@@ -336,6 +494,7 @@ class ARBEvaluator:
         samples = num_samples or self.config.num_samples_per_config
         results: dict[str, object] = {}
         pair_results: dict[str, float] = {}
+        div_digit_error_counts = self._new_digit_error_counts()
 
         for divisor_digits, quotient_digits in self._digit_pairs():
             cases: list[tuple[str, int, int]] = []
@@ -353,16 +512,40 @@ class ARBEvaluator:
                 prompt = f"{a}/{b}="
                 cases.append((prompt, quotient, len(str(quotient)) + 5))
 
-            correct, total, accuracy = self._score_integer_cases(cases)
+            score = self._score_integer_cases(cases)
             pair_key = f"{divisor_digits}x{quotient_digits}"
-            pair_results[pair_key] = accuracy
-            logger.info(f"  div_{pair_key}: {accuracy:.1%} ({correct}/{total})")
+            pair_results[pair_key] = score["accuracy"]
+            logger.info(
+                f"  div_{pair_key}: {score['accuracy']:.1%} "
+                f"({score['correct']}/{score['total']})"
+            )
+            self._merge_digit_error_counts(
+                div_digit_error_counts,
+                {
+                    "total_cases": score["digit_error_profile"]["total_cases"],
+                    "wrong_cases": score["digit_error_profile"]["wrong_cases"],
+                    "parsed_wrong_cases": score["digit_error_profile"]["parsed_wrong_cases"],
+                    "unparsed_cases": score["digit_error_profile"]["unparsed_cases"],
+                    "sign_mismatch_cases": score["digit_error_profile"]["sign_mismatch_cases"],
+                    "positions": {
+                        int(position.removeprefix("position_")): {
+                            "evaluated": stats["evaluated"],
+                            "wrong": stats["wrong"],
+                        }
+                        for position, stats in score["digit_error_profile"]["positions"].items()
+                    },
+                },
+            )
 
             if divisor_digits == quotient_digits:
                 legacy_key = f"div_{divisor_digits}digit"
-                results[legacy_key] = accuracy
+                results[legacy_key] = score["accuracy"]
 
         self._add_pair_metric_summaries(results, "div", pair_results)
+        results["div_wrong_digit_distribution"] = self._finalize_digit_error_profile(
+            div_digit_error_counts
+        )
+        self._log_digit_error_profile("div", results["div_wrong_digit_distribution"])
 
         return results
 

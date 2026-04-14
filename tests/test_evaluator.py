@@ -157,6 +157,22 @@ class DeterministicEvaluator(ARBEvaluator):
         raise AssertionError(f"Unsupported prompt format: {prompt}")
 
 
+class ScriptedIntegerEvaluator(ARBEvaluator):
+    """Evaluator stub that returns a predefined list of generations."""
+
+    def __init__(self, *args, scripted_outputs=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.scripted_outputs = list(scripted_outputs or [])
+
+    def _prepare_model(self) -> None:
+        return None
+
+    def _generate_texts(self, prompts, max_new_tokens=None):
+        if len(prompts) != len(self.scripted_outputs):
+            raise AssertionError("scripted outputs must match prompts length")
+        return list(self.scripted_outputs)
+
+
 class FullEvaluationStub(ARBEvaluator):
     """Evaluator stub that records which suite methods are called."""
 
@@ -266,6 +282,38 @@ class TestEvaluatorBatching:
             torch.tensor([[97, 98, -100, -100], [119, 120, 121, 122]], dtype=torch.long),
         )
 
+    def test_score_integer_cases_reports_left_to_right_wrong_digit_distribution(self):
+        model = FakeModel()
+        tokenizer = FakeTokenizer()
+        evaluator = ScriptedIntegerEvaluator(
+            model=model,
+            tokenizer=tokenizer,
+            config=EvalConfig(),
+            device=torch.device("cpu"),
+            scripted_outputs=["13", "75", "no number"],
+        )
+
+        score = evaluator._score_integer_cases(
+            [
+                ("a", 12, 2),
+                ("b", 45, 2),
+                ("c", 99, 2),
+            ]
+        )
+
+        profile = score["digit_error_profile"]
+        assert score["correct"] == 0
+        assert score["total"] == 3
+        assert profile["position_indexing"] == "left_to_right"
+        assert profile["wrong_cases"] == 3
+        assert profile["parsed_wrong_cases"] == 2
+        assert profile["unparsed_cases"] == 1
+        assert profile["wrong_positions_total"] == 2
+        assert profile["positions"]["position_1"]["evaluated"] == 2
+        assert profile["positions"]["position_1"]["wrong"] == 1
+        assert profile["positions"]["position_2"]["evaluated"] == 2
+        assert profile["positions"]["position_2"]["wrong"] == 1
+
 
 class TestEvaluatorDigitPairs:
     def test_exact_match_reports_mixed_digit_pairs_and_legacy_diagonals(self):
@@ -291,6 +339,8 @@ class TestEvaluatorDigitPairs:
             assert results[f"{op}_overall_mean"] == 1.0
             assert results[f"{op}_diagonal_mean"] == 1.0
             assert results[f"{op}_cross_digit_mean"] == 1.0
+            assert results[f"{op}_wrong_digit_distribution"]["position_indexing"] == "left_to_right"
+            assert results[f"{op}_wrong_digit_distribution"]["wrong_cases"] == 0
 
     def test_subtraction_keeps_ordered_pair_entries_when_operands_swap(self, monkeypatch):
         def fake_sample_number(num_digits, rng, min_value=0):
@@ -336,6 +386,8 @@ class TestEvaluatorDigitPairs:
         assert results["div_overall_mean"] == 1.0
         assert results["div_diagonal_mean"] == 1.0
         assert results["div_cross_digit_mean"] == 1.0
+        assert results["div_wrong_digit_distribution"]["position_indexing"] == "left_to_right"
+        assert results["div_wrong_digit_distribution"]["wrong_cases"] == 0
 
 
 class TestFullEvaluation:

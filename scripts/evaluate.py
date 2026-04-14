@@ -10,7 +10,7 @@ from pathlib import Path
 sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent.parent))
 
 import torch
-from transformers import AutoTokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from mathllm.config import load_config
 from mathllm.evaluation.evaluator import ARBEvaluator
@@ -22,6 +22,43 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 logger = logging.getLogger(__name__)
 
 
+class BaseModelEvaluatorAdapter:
+    """Adapt a raw Hugging Face causal LM to the evaluator's interface."""
+
+    def __init__(self, model):
+        self.model = model
+
+    def eval(self):
+        self.model.eval()
+        return self
+
+    def to(self, device):
+        self.model.to(device)
+        return self
+
+    def generate(self, input_ids, max_new_tokens=20, greedy=True):
+        attention_mask = torch.ones_like(input_ids)
+        pad_token_id = getattr(self.model.config, "pad_token_id", None)
+        eos_token_id = getattr(self.model.config, "eos_token_id", None)
+        if pad_token_id is None:
+            pad_token_id = eos_token_id
+        return self.model.generate(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            max_new_tokens=max_new_tokens,
+            do_sample=not greedy,
+            pad_token_id=pad_token_id,
+        )
+
+    def __call__(self, input_ids, attention_mask, labels):
+        outputs = self.model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            labels=labels,
+        )
+        return {"loss": outputs.loss}
+
+
 def main():
     parser = argparse.ArgumentParser(description="Evaluate ARB-augmented GPT-2")
     parser.add_argument("--config", type=str, default="configs/default.yaml")
@@ -30,6 +67,8 @@ def main():
                             help="Path to an exported final model directory")
     load_group.add_argument("--checkpoint", type=str, default=None,
                             help="Path to ARB checkpoint to load")
+    load_group.add_argument("--base-model-only", action="store_true",
+                            help="Evaluate the raw base model from training.base_model without ARB or LoRA weights")
     parser.add_argument("--output", type=str, default=None,
                         help="Path to save evaluation results as JSON")
     parser.add_argument("--eval-texts", type=str, default=None,
@@ -45,7 +84,7 @@ def main():
     logger.info(f"Using device: {device}")
 
     model_dir = args.model_dir
-    if model_dir is None and args.checkpoint is None:
+    if model_dir is None and args.checkpoint is None and not args.base_model_only:
         configured_model_dir = Path(config.training.final_model_dir)
         if configured_model_dir.is_dir() and (configured_model_dir / EXPORT_CONFIG_FILENAME).exists():
             model_dir = str(configured_model_dir)
@@ -60,6 +99,16 @@ def main():
             model_dir,
             device=device,
         )
+    elif args.base_model_only:
+        tokenizer = AutoTokenizer.from_pretrained(config.training.base_model)
+        if tokenizer.pad_token is None:
+            tokenizer.pad_token = tokenizer.eos_token
+
+        logger.info(f"Loading raw base model: {config.training.base_model}")
+        base_model = AutoModelForCausalLM.from_pretrained(config.training.base_model)
+        if getattr(base_model.config, "pad_token_id", None) is None and tokenizer.pad_token_id is not None:
+            base_model.config.pad_token_id = tokenizer.pad_token_id
+        model = BaseModelEvaluatorAdapter(base_model)
     else:
         # Load tokenizer and model
         tokenizer = AutoTokenizer.from_pretrained(config.training.base_model)

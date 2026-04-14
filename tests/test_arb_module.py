@@ -2,7 +2,7 @@
 
 import torch
 
-from mathllm.arb.arb_module import ArithmeticResidualBlock
+from mathllm.arb.arb_module import ArithmeticResidualBlock, DigitSelector
 from mathllm.arb.constants import DEFAULT_PRIMES
 
 # Token IDs for operators in the test vocabulary (0-99)
@@ -414,3 +414,119 @@ class TestMSBReordering:
         results[0, 0, 1] = 7.0
         msb = arb._reorder_to_msb_first(results)
         assert msb.device.type == "cuda"
+
+
+class TestDigitSelector:
+    """Tests for the DigitSelector (hard index + soft attention)."""
+
+    def test_output_shape_hard_and_attn(self):
+        K, pos_dim, attn_dim = 6, 16, 8
+        sel = DigitSelector(K, pos_dim, attn_dim=attn_dim, hard_select=True)
+        B, S = 2, 5
+        digits = torch.zeros(B, S, K)
+        sign = torch.zeros(B, S, 1)
+        pos_emb = torch.randn(B, S, pos_dim)
+        offset = torch.zeros(B, S, dtype=torch.long)
+        out = sel(digits, sign, pos_emb, offset)
+        # output_dim = 1 (hard) + 8 (attn) + 1 (sign) + 16 (pos) = 26
+        assert out.shape == (B, S, 1 + attn_dim + 1 + pos_dim)
+
+    def test_output_shape_hard_only(self):
+        K, pos_dim = 6, 16
+        sel = DigitSelector(K, pos_dim, attn_dim=0, hard_select=True)
+        B, S = 2, 5
+        digits = torch.zeros(B, S, K)
+        sign = torch.zeros(B, S, 1)
+        pos_emb = torch.randn(B, S, pos_dim)
+        offset = torch.zeros(B, S, dtype=torch.long)
+        out = sel(digits, sign, pos_emb, offset)
+        # output_dim = 1 (hard) + 1 (sign) + 16 (pos) = 18
+        assert out.shape == (B, S, 1 + 1 + pos_dim)
+
+    def test_output_shape_attn_only(self):
+        K, pos_dim, attn_dim = 6, 16, 8
+        sel = DigitSelector(K, pos_dim, attn_dim=attn_dim, hard_select=False)
+        B, S = 2, 5
+        digits = torch.zeros(B, S, K)
+        sign = torch.zeros(B, S, 1)
+        pos_emb = torch.randn(B, S, pos_dim)
+        offset = torch.zeros(B, S, dtype=torch.long)
+        out = sel(digits, sign, pos_emb, offset)
+        # output_dim = 8 (attn) + 1 (sign) + 16 (pos) = 25
+        assert out.shape == (B, S, attn_dim + 1 + pos_dim)
+
+    def test_hard_select_picks_correct_digit(self):
+        K, pos_dim = 6, 16
+        sel = DigitSelector(K, pos_dim, attn_dim=0, hard_select=True)
+        B, S = 1, 6
+        # digits: each position has [1, 2, 3, 4, 5, 6]
+        digits = torch.tensor([[[1, 2, 3, 4, 5, 6]] * S], dtype=torch.float)
+        sign = torch.zeros(B, S, 1)
+        pos_emb = torch.randn(B, S, pos_dim)
+        offset = torch.arange(S).unsqueeze(0)  # [0, 1, 2, 3, 4, 5]
+        out = sel(digits, sign, pos_emb, offset)
+        # First element of output at each position should be digits[offset]
+        for k in range(K):
+            assert out[0, k, 0].item() == float(k + 1), \
+                f"pos {k}: expected {k + 1}, got {out[0, k, 0].item()}"
+
+    def test_sentinel_replaced_with_zero(self):
+        K, pos_dim = 6, 16
+        sel = DigitSelector(K, pos_dim, attn_dim=0, hard_select=True)
+        # 3-digit answer: [5, 3, 1, -1, -1, -1]
+        digits = torch.tensor([[[5, 3, 1, -1, -1, -1]]], dtype=torch.float)
+        sign = torch.zeros(1, 1, 1)
+        pos_emb = torch.randn(1, 1, pos_dim)
+        offset = torch.tensor([[4]])  # offset 4 → digit index 4 → sentinel -1
+        out = sel(digits, sign, pos_emb, offset)
+        assert out[0, 0, 0].item() == 0.0  # sentinel replaced with 0
+
+    def test_sentinel_masked_in_attention(self):
+        """Soft attention should not produce NaN when sentinel positions exist."""
+        K, pos_dim, attn_dim = 6, 16, 8
+        sel = DigitSelector(K, pos_dim, attn_dim=attn_dim, hard_select=True)
+        # Only 2 significant digits, rest sentinel
+        digits = torch.tensor([[[7, 3, -1, -1, -1, -1]]], dtype=torch.float)
+        sign = torch.zeros(1, 1, 1)
+        pos_emb = torch.randn(1, 1, pos_dim)
+        offset = torch.tensor([[0]])
+        out = sel(digits, sign, pos_emb, offset)
+        assert not torch.isnan(out).any(), "NaN in output with sentinel masking"
+
+    def test_all_sentinel_no_nan(self):
+        """Edge case: all digits are sentinel (no significant digits)."""
+        K, pos_dim, attn_dim = 6, 16, 8
+        sel = DigitSelector(K, pos_dim, attn_dim=attn_dim, hard_select=True)
+        digits = torch.full((1, 1, K), -1.0)
+        sign = torch.zeros(1, 1, 1)
+        pos_emb = torch.randn(1, 1, pos_dim)
+        offset = torch.tensor([[0]])
+        out = sel(digits, sign, pos_emb, offset)
+        assert not torch.isnan(out).any(), "NaN when all digits are sentinel"
+
+    def test_gradient_flow(self):
+        """Verify gradients reach W_q, W_k, W_v, and slot_embed."""
+        K, pos_dim, attn_dim = 6, 16, 8
+        sel = DigitSelector(K, pos_dim, attn_dim=attn_dim, hard_select=True)
+        digits = torch.randn(2, 3, K)
+        sign = torch.zeros(2, 3, 1)
+        pos_emb = torch.randn(2, 3, pos_dim, requires_grad=True)
+        offset = torch.zeros(2, 3, dtype=torch.long)
+        out = sel(digits, sign, pos_emb, offset)
+        out.sum().backward()
+        for name in ["W_q", "W_k", "W_v"]:
+            param = getattr(sel, name)
+            assert param.weight.grad is not None, f"No gradient for {name}"
+            assert param.weight.grad.abs().sum() > 0, f"Zero gradient for {name}"
+        assert sel.slot_embed.grad is not None, "No gradient for slot_embed"
+        assert sel.slot_embed.grad.abs().sum() > 0, "Zero gradient for slot_embed"
+
+    def test_output_dim_property(self):
+        sel_both = DigitSelector(6, 16, attn_dim=8, hard_select=True)
+        assert sel_both.output_dim == 1 + 8 + 1  # hard + attn + sign
+
+        sel_hard = DigitSelector(6, 16, attn_dim=0, hard_select=True)
+        assert sel_hard.output_dim == 1 + 1  # hard + sign
+
+        sel_attn = DigitSelector(6, 16, attn_dim=8, hard_select=False)
+        assert sel_attn.output_dim == 8 + 1  # attn + sign

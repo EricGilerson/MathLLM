@@ -170,6 +170,8 @@ class TransformerWithARB(nn.Module):
                 gate_init_logit=config.arb.gate_init_logit,
                 injection_pos_dim=config.arb.injection_pos_dim,
                 injection_mlp_hidden=config.arb.injection_mlp_hidden,
+                injection_attn_dim=config.arb.injection_attn_dim,
+                injection_hard_select=config.arb.injection_hard_select,
             )
 
         # Generation-mode LoRA gate cache

@@ -29,6 +29,8 @@ class ARBConfig:
     extraction_attn_rank: int = 32  # low-rank dimension for extraction attention
     injection_pos_dim: int = 0  # position embedding dim for answer offsets (0 = disabled)
     injection_mlp_hidden: int = 0  # MLP hidden dim for injection (0 = linear)
+    injection_attn_dim: int = 0  # soft attention dim for digit context (0 = disabled, 8 recommended)
+    injection_hard_select: bool = False  # hard digit indexing at each answer position
     lora_rank: int = 0  # LoRA rank for LM head (0 = disabled)
     lora_alpha: float = 1.0  # LoRA scaling factor
     lora_layer_positions: tuple[int, ...] = ()  # Transformer layer indices to LoRA-adapt (empty = disabled)

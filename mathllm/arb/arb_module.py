@@ -19,6 +19,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+import math
+
 import torch
 import torch.nn as nn
 from torch import Tensor
@@ -322,6 +324,104 @@ class ARBComputeCore(nn.Module):
         )
 
 
+class DigitSelector(nn.Module):
+    """Position-aware digit selection: hard index + soft attention context.
+
+    Replaces the naive concatenation of the full digit vector with a cleaner
+    signal for the projection MLP.  At answer position k:
+
+    - **Hard index**: directly selects ``digits[k]`` (no learning needed).
+    - **Soft attention**: a tiny single-head attention over all K digit slots,
+      queried by the position embedding.  Provides magnitude / neighbour
+      context without forcing the MLP to learn implicit selection.
+    """
+
+    def __init__(
+        self,
+        num_digits: int,
+        pos_dim: int,
+        attn_dim: int = 8,
+        hard_select: bool = True,
+    ):
+        super().__init__()
+        self.num_digits = num_digits
+        self.attn_dim = attn_dim
+        self.hard_select = hard_select
+
+        if attn_dim > 0:
+            self.W_q = nn.Linear(pos_dim, attn_dim, bias=False)
+            self.W_k = nn.Linear(1, attn_dim, bias=False)
+            self.W_v = nn.Linear(1, attn_dim, bias=False)
+            self.slot_embed = nn.Parameter(
+                torch.randn(num_digits, attn_dim) * 0.02
+            )
+            self.attn_scale = math.sqrt(attn_dim)
+
+    @property
+    def output_dim(self) -> int:
+        """Total output dimension *excluding* ``pos_emb`` (caller appends)."""
+        d = 0
+        if self.hard_select:
+            d += 1           # hard-selected digit value
+        if self.attn_dim > 0:
+            d += self.attn_dim  # soft attention context vector
+        d += 1               # sign bit
+        return d
+
+    def forward(
+        self,
+        digits: Tensor,
+        sign: Tensor,
+        pos_emb: Tensor,
+        offset: Tensor,
+    ) -> Tensor:
+        """Select digit information for each answer position.
+
+        Args:
+            digits:  [B, S, K]       — MSB-first digit values (-1 = sentinel)
+            sign:    [B, S, 1]       — sign bit
+            pos_emb: [B, S, pos_dim] — position embeddings
+            offset:  [B, S]          — integer offsets from ``=``
+
+        Returns:
+            [B, S, output_dim + pos_dim] — combined features for the MLP.
+        """
+        B, S, K = digits.shape
+        parts: list[Tensor] = []
+
+        # --- Hard selection: pick the single relevant digit ---
+        if self.hard_select:
+            k_idx = offset.clamp(0, K - 1).unsqueeze(-1)   # [B, S, 1]
+            d_hard = digits.gather(-1, k_idx)                # [B, S, 1]
+            d_hard = torch.where(d_hard < 0, torch.zeros_like(d_hard), d_hard)
+            parts.append(d_hard)
+
+        # --- Soft attention context over all digit slots ---
+        if self.attn_dim > 0:
+            q = self.W_q(pos_emb)                            # [B, S, D_a]
+
+            d_exp = digits.unsqueeze(-1)                     # [B, S, K, 1]
+            keys = self.W_k(d_exp) + self.slot_embed         # [B, S, K, D_a]
+            vals = self.W_v(d_exp) + self.slot_embed         # [B, S, K, D_a]
+
+            # Scaled dot-product:  [B, S, 1, D_a] @ [B, S, D_a, K] → [B, S, K]
+            scores = torch.matmul(
+                q.unsqueeze(-2), keys.transpose(-1, -2),
+            ).squeeze(-2) / self.attn_scale
+
+            # Mask sentinel positions
+            sentinel_mask = digits < 0                       # [B, S, K]
+            scores = scores.masked_fill(sentinel_mask, -1e9)
+
+            attn_w = torch.softmax(scores, dim=-1)           # [B, S, K]
+            ctx = (attn_w.unsqueeze(-1) * vals).sum(dim=-2)  # [B, S, D_a]
+            parts.append(ctx)
+
+        parts.append(sign)
+        parts.append(pos_emb)
+        return torch.cat(parts, dim=-1)
+
+
 class ARBInjector(nn.Module):
     """Stage 4: per-layer injection with smart activation masking.
 
@@ -340,18 +440,37 @@ class ARBInjector(nn.Module):
         gate_init_logit: float = -2.0,
         injection_pos_dim: int = 0,
         injection_mlp_hidden: int = 0,
+        injection_attn_dim: int = 0,
+        injection_hard_select: bool = False,
     ):
         super().__init__()
         self.num_digits = num_digits
         self.injection_pos_dim = injection_pos_dim
+        self._use_digit_selector = (
+            injection_pos_dim > 0
+            and (injection_hard_select or injection_attn_dim > 0)
+        )
 
         digit_result_dim = num_digits + 1  # K digits + sign bit
 
         if injection_pos_dim > 0:
             self.answer_pos_embed = nn.Embedding(_MAX_ANSWER_TOKENS, injection_pos_dim)
-            total_result_dim = digit_result_dim + injection_pos_dim
         else:
             self.answer_pos_embed = None
+
+        if self._use_digit_selector:
+            self.digit_selector = DigitSelector(
+                num_digits=num_digits,
+                pos_dim=injection_pos_dim,
+                attn_dim=injection_attn_dim,
+                hard_select=injection_hard_select,
+            )
+            total_result_dim = self.digit_selector.output_dim + injection_pos_dim
+        elif injection_pos_dim > 0:
+            self.digit_selector = None
+            total_result_dim = digit_result_dim + injection_pos_dim
+        else:
+            self.digit_selector = None
             total_result_dim = digit_result_dim
 
         self.inject = ResultInjector(
@@ -442,19 +561,30 @@ class ARBInjector(nn.Module):
         B, S = h.shape[:2]
         device = h.device
 
+        K = self.num_digits
+
         if generation_offset is not None:
             # Generation cache path (step 2+): results is [B, 1, K+1]
-            masked_results = results  # already the right answer
-
-            if self.answer_pos_embed is not None:
-                offset = min(generation_offset, _MAX_ANSWER_TOKENS - 1)
+            if self._use_digit_selector:
+                digits = results[..., :K]                    # [B, 1, K]
+                sign = results[..., K:]                      # [B, 1, 1]
+                offset_val = min(generation_offset, _MAX_ANSWER_TOKENS - 1)
                 offset_tensor = torch.full(
-                    (B, 1), offset, dtype=torch.long, device=device
+                    (B, 1), offset_val, dtype=torch.long, device=device
                 )
                 pos_emb = self.answer_pos_embed(offset_tensor)
-                masked_results = torch.cat([masked_results, pos_emb], dim=-1)
-
-            h_prime = self.inject(masked_results, h)
+                selected = self.digit_selector(digits, sign, pos_emb, offset_tensor)
+                h_prime = self.inject(selected, h)
+            else:
+                masked_results = results
+                if self.answer_pos_embed is not None:
+                    offset = min(generation_offset, _MAX_ANSWER_TOKENS - 1)
+                    offset_tensor = torch.full(
+                        (B, 1), offset, dtype=torch.long, device=device
+                    )
+                    pos_emb = self.answer_pos_embed(offset_tensor)
+                    masked_results = torch.cat([masked_results, pos_emb], dim=-1)
+                h_prime = self.inject(masked_results, h)
 
             # Sequence-level gate
             seq_gate = has_eq.float().view(B, 1, 1)
@@ -464,17 +594,27 @@ class ARBInjector(nn.Module):
         inject_mask = self._build_smart_inject_mask(input_ids, eq_pos, has_eq)
         masked_results = results * inject_mask.unsqueeze(2)
 
-        # Add position-aware answer offset embeddings if enabled
-        if self.answer_pos_embed is not None:
+        if self._use_digit_selector:
+            digits = masked_results[..., :K]                 # [B, S, K]
+            sign = masked_results[..., K:]                   # [B, S, 1]
             positions = torch.arange(S, device=device).unsqueeze(0)
             offset = (positions - eq_pos.unsqueeze(1)).clamp(0, _MAX_ANSWER_TOKENS - 1)
-            offset = (offset * inject_mask).long()
+            offset = (offset * inject_mask).long()           # [B, S]
             pos_emb = self.answer_pos_embed(offset)
             pos_emb = pos_emb * inject_mask.unsqueeze(2)
-            masked_results = torch.cat([masked_results, pos_emb], dim=-1)
-
-        # Stage 4: Inject
-        h_prime = self.inject(masked_results, h)
+            selected = self.digit_selector(digits, sign, pos_emb, offset)
+            selected = selected * inject_mask.unsqueeze(2)
+            h_prime = self.inject(selected, h)
+        else:
+            # Legacy path: concatenate full digit vector + pos embedding
+            if self.answer_pos_embed is not None:
+                positions = torch.arange(S, device=device).unsqueeze(0)
+                offset = (positions - eq_pos.unsqueeze(1)).clamp(0, _MAX_ANSWER_TOKENS - 1)
+                offset = (offset * inject_mask).long()
+                pos_emb = self.answer_pos_embed(offset)
+                pos_emb = pos_emb * inject_mask.unsqueeze(2)
+                masked_results = torch.cat([masked_results, pos_emb], dim=-1)
+            h_prime = self.inject(masked_results, h)
 
         # Sequence-level gate (prevents MLP bias leakage on non-arithmetic)
         seq_gate = has_eq.float().view(B, 1, 1)
@@ -509,6 +649,8 @@ class ArithmeticResidualBlock(nn.Module):
         eq_token_id: int = _DEFAULT_EQ_TOKEN_ID,
         injection_pos_dim: int = 0,
         injection_mlp_hidden: int = 0,
+        injection_attn_dim: int = 0,
+        injection_hard_select: bool = False,
     ):
         super().__init__()
         self.num_digits = num_digits
@@ -536,6 +678,8 @@ class ArithmeticResidualBlock(nn.Module):
             gate_init_logit=gate_init_logit,
             injection_pos_dim=injection_pos_dim,
             injection_mlp_hidden=injection_mlp_hidden,
+            injection_attn_dim=injection_attn_dim,
+            injection_hard_select=injection_hard_select,
         )
 
         # Expose sub-modules for direct access (backward compat)

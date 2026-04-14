@@ -61,6 +61,14 @@ def _sample_operands(num_digits: int, rng) -> tuple[int, int]:
     return rng.randint(low, high), rng.randint(low, high)
 
 
+def _sample_number(num_digits: int, rng, min_value: int = 0) -> int:
+    """Sample one integer with the requested digit count."""
+    low = 10 ** (num_digits - 1) if num_digits > 1 else 0
+    low = max(low, min_value)
+    high = 10**num_digits - 1
+    return rng.randint(low, high)
+
+
 class ARBEvaluator:
     """Comprehensive evaluation of ARB-augmented models."""
 
@@ -168,19 +176,64 @@ class ARBEvaluator:
                 return None
         return None
 
+    def _digit_pairs(self, max_digits: int | None = None) -> list[tuple[int, int]]:
+        """Enumerate ordered digit-count pairs over the configured range."""
+        min_d, configured_max = self.config.max_digits_range
+        upper = configured_max if max_digits is None else min(configured_max, max_digits)
+        return [
+            (digits_a, digits_b)
+            for digits_a in range(min_d, upper + 1)
+            for digits_b in range(min_d, upper + 1)
+        ]
+
+    def _score_integer_cases(
+        self,
+        cases: list[tuple[str, int, int]],
+    ) -> tuple[int, int, float]:
+        """Generate answers for integer prompts and compute exact-match accuracy."""
+        generated_texts = self._generate_texts(
+            [prompt for prompt, _, _ in cases],
+            [max_tokens for _, _, max_tokens in cases],
+        )
+        correct = 0
+        for (_, expected, _), generated in zip(cases, generated_texts):
+            extracted = self._extract_number_from_generation(generated)
+            if extracted is not None and int(extracted) == expected:
+                correct += 1
+        total = len(cases)
+        return correct, total, correct / max(total, 1)
+
+    def _add_pair_metric_summaries(
+        self,
+        results: dict[str, object],
+        op_name: str,
+        pair_results: dict[str, float],
+    ) -> None:
+        """Store per-pair metrics and aggregate summaries for one operation."""
+        diagonal_values = []
+        cross_values = []
+        for pair_key, accuracy in pair_results.items():
+            left_digits, right_digits = pair_key.split("x")
+            if left_digits == right_digits:
+                diagonal_values.append(accuracy)
+            else:
+                cross_values.append(accuracy)
+
+        all_values = list(pair_results.values())
+        results[f"{op_name}_digit_pairs"] = pair_results
+        results[f"{op_name}_overall_mean"] = sum(all_values) / max(len(all_values), 1)
+        results[f"{op_name}_diagonal_mean"] = sum(diagonal_values) / max(len(diagonal_values), 1)
+        results[f"{op_name}_cross_digit_mean"] = sum(cross_values) / max(len(cross_values), 1)
+
     def exact_match_accuracy(
         self,
         num_samples: int | None = None,
         seed: int = 12345,
-    ) -> dict[str, float]:
-        """Test exact-match accuracy on N-digit operations.
-
-        For each digit count in [1, max_digits] and each operation,
-        generates prompts like "347 + 291 =" and checks if the model
-        produces the correct result.
+    ) -> dict[str, object]:
+        """Test exact-match accuracy on ordered digit-pair arithmetic.
 
         Returns:
-            Dict mapping "{op}_{n}digit" to accuracy (0.0 to 1.0)
+            Dict containing legacy same-digit keys plus full digit-pair metrics.
         """
         import random
 
@@ -188,23 +241,20 @@ class ARBEvaluator:
         self._prepare_model()
 
         samples = num_samples or self.config.num_samples_per_config
-        min_d, max_d = self.config.max_digits_range
-        results: dict[str, float] = {}
+        results: dict[str, object] = {}
 
-        for n in range(min_d, max_d + 1):
-            for op in ["add", "sub", "mul"]:
+        for op in ["add", "sub", "mul"]:
+            pair_results: dict[str, float] = {}
+            for digits_a, digits_b in self._digit_pairs():
                 cases: list[tuple[str, int, int]] = []
 
                 for _ in range(samples):
-                    a, b = _sample_operands(n, rng)
+                    a = _sample_number(digits_a, rng)
+                    b = _sample_number(digits_b, rng)
 
-                    # Enforce a >= b for subtraction (non-negative results only)
+                    # Signed subtraction is not yet supported by the injection format.
                     if op == "sub" and a < b:
                         a, b = b, a
-
-                    # For multiplication, use smaller operands to stay in range
-                    if op == "mul" and n > 5:
-                        a, b = _sample_operands(min(n, 4), rng)
 
                     expected = _compute_expected(op, a, b)
                     if expected is None or abs(expected) > 10**10:
@@ -214,23 +264,31 @@ class ARBEvaluator:
                     prompt = f"{a}{symbol}{b}="
                     cases.append((prompt, expected, len(str(abs(expected))) + 5))
 
-                generated_texts = self._generate_texts(
-                    [prompt for prompt, _, _ in cases],
-                    [max_tokens for _, _, max_tokens in cases],
-                )
-                correct = 0
-                for (_, expected, _), generated in zip(cases, generated_texts):
-                    extracted = self._extract_number_from_generation(generated)
-                    if extracted is not None and int(extracted) == expected:
-                        correct += 1
-                total = len(cases)
+                correct, total, accuracy = self._score_integer_cases(cases)
+                pair_key = f"{digits_a}x{digits_b}"
+                pair_results[pair_key] = accuracy
+                logger.info(f"  {op}_{pair_key}: {accuracy:.1%} ({correct}/{total})")
 
-                accuracy = correct / max(total, 1)
-                key = f"{op}_{n}digit"
-                results[key] = accuracy
-                logger.info(f"  {key}: {accuracy:.1%} ({correct}/{total})")
+                if digits_a == digits_b:
+                    legacy_key = f"{op}_{digits_a}digit"
+                    results[legacy_key] = accuracy
 
-        # Exponentiation (separate because operand sampling differs)
+            self._add_pair_metric_summaries(results, op, pair_results)
+
+        return results
+
+    def exponentiation_accuracy(
+        self,
+        num_samples: int | None = None,
+        seed: int = 12345,
+    ) -> dict[str, float]:
+        """Test exact-match accuracy on exponentiation."""
+        import random
+
+        rng = random.Random(seed)
+        self._prepare_model()
+
+        samples = num_samples or self.config.num_samples_per_config
         exp_cases: list[tuple[str, int, int]] = []
         for _ in range(samples):
             a = rng.randint(2, 20)
@@ -241,31 +299,18 @@ class ARBEvaluator:
             prompt = f"{a}^{b}="
             exp_cases.append((prompt, expected, len(str(expected)) + 5))
 
-        generated_texts = self._generate_texts(
-            [prompt for prompt, _, _ in exp_cases],
-            [max_tokens for _, _, max_tokens in exp_cases],
-        )
-        for (_, expected, _), generated in zip(exp_cases, generated_texts):
-            extracted = self._extract_number_from_generation(generated)
-            if extracted is not None and int(extracted) == expected:
-                results.setdefault("exp_correct", 0)
-                results["exp_correct"] = results.get("exp_correct", 0) + 1
-            results.setdefault("exp_total", 0)
-            results["exp_total"] = results.get("exp_total", 0) + 1
-
-        if "exp_total" in results and results["exp_total"] > 0:
-            results["exp_accuracy"] = results.pop("exp_correct", 0) / results.pop("exp_total")
-
-        return results
+        correct, total, accuracy = self._score_integer_cases(exp_cases)
+        logger.info(f"  exp_accuracy: {accuracy:.1%} ({correct}/{total})")
+        return {"exp_accuracy": accuracy}
 
     def division_accuracy(
         self,
         num_samples: int | None = None,
         seed: int = 54321,
-    ) -> dict[str, float]:
+    ) -> dict[str, object]:
         """Test exact-match accuracy on exact division.
 
-        Generates prompts like "120 / 4 =" where divisor evenly divides dividend.
+        Evaluates ordered (divisor_digits, quotient_digits) pairs.
 
         Returns:
             Dict with division accuracy metrics.
@@ -276,15 +321,18 @@ class ARBEvaluator:
         self._prepare_model()
 
         samples = num_samples or self.config.num_samples_per_config
-        min_d, max_d = self.config.max_digits_range
-        results: dict[str, float] = {}
+        results: dict[str, object] = {}
+        pair_results: dict[str, float] = {}
 
-        for n in range(min_d, min(max_d + 1, 6)):  # up to 5-digit dividends
+        for divisor_digits, quotient_digits in self._digit_pairs():
             cases: list[tuple[str, int, int]] = []
+            attempts = 0
+            max_attempts = max(samples * 20, 20)
 
-            for _ in range(samples):
-                b = rng.randint(2, 10 ** min(n, 3) - 1)
-                quotient = rng.randint(1, max(1, (10**n - 1) // max(b, 1)))
+            while len(cases) < samples and attempts < max_attempts:
+                attempts += 1
+                b = _sample_number(divisor_digits, rng, min_value=1)
+                quotient = _sample_number(quotient_digits, rng, min_value=1)
                 a = b * quotient
                 if a > 10**10:
                     continue
@@ -292,21 +340,16 @@ class ARBEvaluator:
                 prompt = f"{a}/{b}="
                 cases.append((prompt, quotient, len(str(quotient)) + 5))
 
-            generated_texts = self._generate_texts(
-                [prompt for prompt, _, _ in cases],
-                [max_tokens for _, _, max_tokens in cases],
-            )
-            correct = 0
-            for (_, quotient, _), generated in zip(cases, generated_texts):
-                extracted = self._extract_number_from_generation(generated)
-                if extracted is not None and int(extracted) == quotient:
-                    correct += 1
-            total = len(cases)
+            correct, total, accuracy = self._score_integer_cases(cases)
+            pair_key = f"{divisor_digits}x{quotient_digits}"
+            pair_results[pair_key] = accuracy
+            logger.info(f"  div_{pair_key}: {accuracy:.1%} ({correct}/{total})")
 
-            accuracy = correct / max(total, 1)
-            key = f"div_{n}digit"
-            results[key] = accuracy
-            logger.info(f"  {key}: {accuracy:.1%} ({correct}/{total})")
+            if divisor_digits == quotient_digits:
+                legacy_key = f"div_{divisor_digits}digit"
+                results[legacy_key] = accuracy
+
+        self._add_pair_metric_summaries(results, "div", pair_results)
 
         return results
 
@@ -743,7 +786,7 @@ class ARBEvaluator:
         self,
         eval_texts: list[str] | None = None,
     ) -> dict[str, object]:
-        """Run the complete evaluation suite."""
+        """Run the currently enabled integer evaluation suite."""
         results: dict[str, object] = {}
 
         logger.info("=== Exact Match Accuracy ===")
@@ -751,25 +794,5 @@ class ARBEvaluator:
 
         logger.info("=== Division Accuracy ===")
         results["division"] = self.division_accuracy()
-
-        logger.info("=== Transcendental Accuracy ===")
-        results["transcendental"] = self.transcendental_accuracy()
-
-        logger.info("=== Float Arithmetic Accuracy ===")
-        results["float_arithmetic"] = self.float_arithmetic_accuracy()
-
-        logger.info("=== Multi-Step Accuracy ===")
-        results["multi_step"] = self.multi_step_accuracy()
-
-        logger.info("=== Ablation Test ===")
-        results["ablation"] = self.ablation_test()
-
-        if hasattr(self.model, "lora_head") and self.model.lora_head is not None:
-            logger.info("=== Four-Way Ablation ===")
-            results["four_way_ablation"] = self.four_way_ablation()
-
-        if eval_texts:
-            logger.info("=== Perplexity Test ===")
-            results["perplexity"] = self.perplexity_test(eval_texts)
 
         return results

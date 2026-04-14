@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import math
+import re
 
 import torch
 
 from mathllm.config import EvalConfig
+from mathllm.evaluation import evaluator as evaluator_module
 from mathllm.evaluation.evaluator import ARBEvaluator
 
 
@@ -116,6 +118,79 @@ class FakeModel:
         return {"loss": torch.tensor(2.0, device=input_ids.device)}
 
 
+class DeterministicEvaluator(ARBEvaluator):
+    """Evaluator stub that returns the mathematically correct integer answer."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.prompt_history: list[str] = []
+
+    def _prepare_model(self) -> None:
+        return None
+
+    def _generate_texts(self, prompts, max_new_tokens=None):
+        self.prompt_history.extend(prompts)
+        return [self._solve_prompt(prompt) for prompt in prompts]
+
+    @staticmethod
+    def _solve_prompt(prompt: str) -> str:
+        expression = prompt.rstrip("=")
+        if "^" in expression:
+            left, right = expression.split("^")
+            return str(int(left) ** int(right))
+
+        match = re.fullmatch(r"(\d+)([+\-*/])(\d+)", expression)
+        if match is None:
+            raise AssertionError(f"Unexpected prompt format: {prompt}")
+
+        left = int(match.group(1))
+        op = match.group(2)
+        right = int(match.group(3))
+        if op == "+":
+            return str(left + right)
+        if op == "-":
+            return str(left - right)
+        if op == "*":
+            return str(left * right)
+        if op == "/":
+            return str(left // right)
+        raise AssertionError(f"Unsupported prompt format: {prompt}")
+
+
+class FullEvaluationStub(ARBEvaluator):
+    """Evaluator stub that records which suite methods are called."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.called: list[str] = []
+
+    def exact_match_accuracy(self, num_samples=None, seed=12345):
+        self.called.append("exact_match")
+        return {"ok": 1.0}
+
+    def division_accuracy(self, num_samples=None, seed=54321):
+        self.called.append("division")
+        return {"ok": 1.0}
+
+    def transcendental_accuracy(self, num_samples=None, tolerance=1e-4, seed=67890):
+        raise AssertionError("transcendental_accuracy should not be called")
+
+    def float_arithmetic_accuracy(self, num_samples=None, tolerance=1e-4, seed=11111):
+        raise AssertionError("float_arithmetic_accuracy should not be called")
+
+    def multi_step_accuracy(self, num_samples=None, seed=22222):
+        raise AssertionError("multi_step_accuracy should not be called")
+
+    def ablation_test(self, num_samples=50, seed=99):
+        raise AssertionError("ablation_test should not be called")
+
+    def four_way_ablation(self, num_samples=50, seed=99):
+        raise AssertionError("four_way_ablation should not be called")
+
+    def perplexity_test(self, eval_texts, max_samples=200):
+        raise AssertionError("perplexity_test should not be called")
+
+
 class TestEvaluatorBatching:
     def test_generate_texts_batches_same_shape_prompts(self):
         model = FakeModel()
@@ -168,3 +243,95 @@ class TestEvaluatorBatching:
             forward_call["labels"],
             torch.tensor([[97, 98, -100, -100], [119, 120, 121, 122]], dtype=torch.long),
         )
+
+
+class TestEvaluatorDigitPairs:
+    def test_exact_match_reports_mixed_digit_pairs_and_legacy_diagonals(self):
+        model = FakeModel()
+        tokenizer = FakeTokenizer()
+        config = EvalConfig(num_samples_per_config=1, max_digits_range=(1, 2))
+        evaluator = DeterministicEvaluator(
+            model=model,
+            tokenizer=tokenizer,
+            config=config,
+            device=torch.device("cpu"),
+        )
+
+        results = evaluator.exact_match_accuracy(num_samples=1)
+
+        expected_pairs = {"1x1", "1x2", "2x1", "2x2"}
+        for op in ("add", "sub", "mul"):
+            pair_results = results[f"{op}_digit_pairs"]
+            assert set(pair_results) == expected_pairs
+            assert all(accuracy == 1.0 for accuracy in pair_results.values())
+            assert results[f"{op}_1digit"] == pair_results["1x1"]
+            assert results[f"{op}_2digit"] == pair_results["2x2"]
+            assert results[f"{op}_overall_mean"] == 1.0
+            assert results[f"{op}_diagonal_mean"] == 1.0
+            assert results[f"{op}_cross_digit_mean"] == 1.0
+
+    def test_subtraction_keeps_ordered_pair_entries_when_operands_swap(self, monkeypatch):
+        def fake_sample_number(num_digits, rng, min_value=0):
+            if num_digits == 1:
+                return max(min_value, 0)
+            return max(min_value, 10 ** (num_digits - 1))
+
+        monkeypatch.setattr(evaluator_module, "_sample_number", fake_sample_number)
+
+        model = FakeModel()
+        tokenizer = FakeTokenizer()
+        config = EvalConfig(num_samples_per_config=1, max_digits_range=(1, 3))
+        evaluator = DeterministicEvaluator(
+            model=model,
+            tokenizer=tokenizer,
+            config=config,
+            device=torch.device("cpu"),
+        )
+
+        results = evaluator.exact_match_accuracy(num_samples=1)
+
+        assert results["sub_digit_pairs"]["1x3"] == 1.0
+        assert results["sub_digit_pairs"]["3x1"] == 1.0
+
+    def test_division_reports_mixed_digit_pairs_and_legacy_diagonals(self):
+        model = FakeModel()
+        tokenizer = FakeTokenizer()
+        config = EvalConfig(num_samples_per_config=1, max_digits_range=(1, 2))
+        evaluator = DeterministicEvaluator(
+            model=model,
+            tokenizer=tokenizer,
+            config=config,
+            device=torch.device("cpu"),
+        )
+
+        results = evaluator.division_accuracy(num_samples=1)
+
+        expected_pairs = {"1x1", "1x2", "2x1", "2x2"}
+        assert set(results["div_digit_pairs"]) == expected_pairs
+        assert all(accuracy == 1.0 for accuracy in results["div_digit_pairs"].values())
+        assert results["div_1digit"] == results["div_digit_pairs"]["1x1"]
+        assert results["div_2digit"] == results["div_digit_pairs"]["2x2"]
+        assert results["div_overall_mean"] == 1.0
+        assert results["div_diagonal_mean"] == 1.0
+        assert results["div_cross_digit_mean"] == 1.0
+
+
+class TestFullEvaluation:
+    def test_full_evaluation_only_runs_integer_suites(self):
+        model = FakeModel()
+        tokenizer = FakeTokenizer()
+        config = EvalConfig()
+        evaluator = FullEvaluationStub(
+            model=model,
+            tokenizer=tokenizer,
+            config=config,
+            device=torch.device("cpu"),
+        )
+
+        results = evaluator.full_evaluation(eval_texts=["language sample"])
+
+        assert results == {
+            "exact_match": {"ok": 1.0},
+            "division": {"ok": 1.0},
+        }
+        assert evaluator.called == ["exact_match", "division"]

@@ -16,8 +16,7 @@ wandb/
 .pytest_cache/
 CLAUDE.md
 /.idea
-/trained_model
-/trained_model_poc
+/trained_model*
 /data_poc
 /data_360m
 tmp.md

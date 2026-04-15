@@ -117,6 +117,10 @@ python scripts/export_checkpoint.py --config configs/360m.yaml
 python scripts/evaluate.py --config configs/360m.yaml
 python scripts/evaluate.py --model-dir trained_model/
 
+# Zero-forgetting benchmark (WikiText-103 + PIQA + HellaSwag)
+python scripts/benchmark_zero_forgetting.py --config configs/360m.yaml
+python scripts/benchmark_zero_forgetting.py --model-dir trained_model_360m/
+
 # Inference
 python scripts/infer.py --model-dir trained_model/ --prompt "347 * 291 ="
 python scripts/infer.py --model-dir trained_model/  # interactive REPL
@@ -158,6 +162,7 @@ scripts/
 ├── train.py                    #   Train with checkpointing & auto-resume
 ├── export_checkpoint.py        #   Export model bundle from checkpoint
 ├── evaluate.py                 #   Evaluate accuracy
+├── benchmark_zero_forgetting.py #  Language-retention benchmark vs. frozen base
 ├── infer.py                    #   Interactive REPL / batch inference
 └── infer_checkpoint.py         #   Inference on raw checkpoints
 ```

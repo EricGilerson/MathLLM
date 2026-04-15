@@ -4,6 +4,7 @@ import torch
 
 from mathllm.arb.arb_module import ArithmeticResidualBlock, DigitSelector
 from mathllm.arb.constants import DEFAULT_PRIMES
+from mathllm.arb.stage4_inject import ResultInjector
 
 # Token IDs for operators in the test vocabulary (0-99)
 _OP_TOKENS = {'+': 10, '-': 12, '*': 14, '^': 16, '/': 18}
@@ -46,6 +47,31 @@ def _build_test_arb(hidden_dim=64, with_op_selection=False, **kwargs):
 
 
 class TestARBModule:
+    def test_result_injector_eval_gate_multiplier_scales_residual(self):
+        injector = ResultInjector(
+            hidden_dim=2,
+            result_dim=2,
+            dropout=0.0,
+            init_std=0.0,
+            gate_init_logit=0.0,
+        )
+        injector.eval()
+        with torch.no_grad():
+            injector.projection.weight.copy_(torch.eye(2))
+            injector.projection.bias.zero_()
+
+        h = torch.zeros(1, 1, 2)
+        results = torch.tensor([[[2.0, 4.0]]])
+
+        out_full = injector(results, h)
+        injector.set_eval_gate_multiplier(0.5)
+        out_half = injector(results, h)
+        injector.set_eval_gate_multiplier(0.0)
+        out_zero = injector(results, h)
+
+        assert torch.allclose(out_half, out_full * 0.5, atol=1e-6)
+        assert torch.allclose(out_zero, h, atol=1e-6)
+
     def test_output_shape(self):
         arb = _build_test_arb()
         h = torch.randn(2, 4, 64)

@@ -318,6 +318,371 @@ def test_evaluate_script_rejects_prior_logit_analysis_for_base_model_only(monkey
         module.main()
 
 
+def test_evaluate_script_rejects_gate_multiplier_for_base_model_only(monkeypatch):
+    module = _load_evaluate_module()
+
+    yaml_config = Config()
+    yaml_config.training.device = "cpu"
+
+    monkeypatch.setattr(module, "load_config", lambda path: yaml_config)
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            str(SCRIPT_PATH),
+            "--config",
+            "configs/360m.yaml",
+            "--base-model-only",
+            "--gate-multiplier",
+            "0.5",
+        ],
+    )
+
+    with pytest.raises(SystemExit):
+        module.main()
+
+
+def test_evaluate_script_rejects_lora_multiplier_for_base_model_only(monkeypatch):
+    module = _load_evaluate_module()
+
+    yaml_config = Config()
+    yaml_config.training.device = "cpu"
+
+    monkeypatch.setattr(module, "load_config", lambda path: yaml_config)
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            str(SCRIPT_PATH),
+            "--config",
+            "configs/360m.yaml",
+            "--base-model-only",
+            "--lora-multiplier",
+            "0",
+        ],
+    )
+
+    with pytest.raises(SystemExit):
+        module.main()
+
+
+def test_evaluate_script_applies_gate_multiplier_to_all_injectors(monkeypatch):
+    module = _load_evaluate_module()
+
+    yaml_config = Config()
+    yaml_config.training.device = "cpu"
+
+    class FakeResultInjector:
+        def __init__(self):
+            self.multipliers = []
+
+        def set_eval_gate_multiplier(self, multiplier):
+            self.multipliers.append(multiplier)
+
+    class FakeARBInjector:
+        def __init__(self):
+            self.inject = FakeResultInjector()
+
+    class FakeModel:
+        def __init__(self):
+            self.injectors = {
+                "4": FakeARBInjector(),
+                "8": FakeARBInjector(),
+            }
+
+    fake_model = FakeModel()
+    captured = {}
+
+    class FakeEvaluator:
+        def __init__(self, model, tokenizer, config, device=None):
+            captured["model"] = model
+
+        def full_evaluation(
+            self,
+            eval_texts=None,
+            include_prior_logit_analysis: bool = False,
+            base_model=None,
+            base_tokenizer=None,
+        ):
+            captured["active_multipliers"] = [
+                injector.inject.multipliers[-1]
+                for injector in fake_model.injectors.values()
+            ]
+            return {"ok": True}
+
+    monkeypatch.setattr(module, "load_config", lambda path: yaml_config)
+    monkeypatch.setattr(module, "get_device", lambda device: "cpu")
+    monkeypatch.setattr(
+        module.GPT2WithARB,
+        "from_exported_model",
+        classmethod(lambda cls, output_dir, device=None: (fake_model, "tokenizer", Config())),
+    )
+    monkeypatch.setattr(module, "ARBEvaluator", FakeEvaluator)
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            str(SCRIPT_PATH),
+            "--config",
+            "configs/360m.yaml",
+            "--model-dir",
+            "trained_model_360m",
+            "--gate-multiplier",
+            "0.5",
+        ],
+    )
+
+    module.main()
+
+    assert captured["active_multipliers"] == [0.5, 0.5]
+
+
+def test_evaluate_script_applies_lora_multiplier_to_all_lora_adapters(monkeypatch):
+    module = _load_evaluate_module()
+
+    yaml_config = Config()
+    yaml_config.training.device = "cpu"
+
+    class FakeResultInjector:
+        def set_eval_gate_multiplier(self, multiplier):
+            pass
+
+    class FakeARBInjector:
+        def __init__(self):
+            self.inject = FakeResultInjector()
+
+    class FakeLoRA:
+        def __init__(self):
+            self.multipliers = []
+
+        def set_eval_multiplier(self, multiplier):
+            self.multipliers.append(multiplier)
+
+    class FakeModel:
+        def __init__(self):
+            self.injectors = {"4": FakeARBInjector()}
+            self.lora_head = FakeLoRA()
+            self.lora_layers = {
+                "layer_1_q_proj": FakeLoRA(),
+                "layer_1_v_proj": FakeLoRA(),
+            }
+
+    fake_model = FakeModel()
+    captured = {}
+
+    class FakeEvaluator:
+        def __init__(self, model, tokenizer, config, device=None):
+            pass
+
+        def full_evaluation(
+            self,
+            eval_texts=None,
+            include_prior_logit_analysis: bool = False,
+            base_model=None,
+            base_tokenizer=None,
+        ):
+            captured["lora_multipliers"] = [
+                fake_model.lora_head.multipliers[-1],
+                fake_model.lora_layers["layer_1_q_proj"].multipliers[-1],
+                fake_model.lora_layers["layer_1_v_proj"].multipliers[-1],
+            ]
+            return {"ok": True}
+
+    monkeypatch.setattr(module, "load_config", lambda path: yaml_config)
+    monkeypatch.setattr(module, "get_device", lambda device: "cpu")
+    monkeypatch.setattr(
+        module.GPT2WithARB,
+        "from_exported_model",
+        classmethod(lambda cls, output_dir, device=None: (fake_model, "tokenizer", Config())),
+    )
+    monkeypatch.setattr(module, "ARBEvaluator", FakeEvaluator)
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            str(SCRIPT_PATH),
+            "--config",
+            "configs/360m.yaml",
+            "--model-dir",
+            "trained_model_360m",
+            "--lora-multiplier",
+            "0",
+        ],
+    )
+
+    module.main()
+
+    assert captured["lora_multipliers"] == [0.0, 0.0, 0.0]
+
+
+def test_evaluate_script_combines_gate_and_lora_ablation(monkeypatch):
+    module = _load_evaluate_module()
+
+    yaml_config = Config()
+    yaml_config.training.device = "cpu"
+
+    class FakeResultInjector:
+        def __init__(self):
+            self.multipliers = []
+
+        def set_eval_gate_multiplier(self, multiplier):
+            self.multipliers.append(multiplier)
+
+    class FakeARBInjector:
+        def __init__(self):
+            self.inject = FakeResultInjector()
+
+    class FakeLoRA:
+        def __init__(self):
+            self.multipliers = []
+
+        def set_eval_multiplier(self, multiplier):
+            self.multipliers.append(multiplier)
+
+    class FakeModel:
+        def __init__(self):
+            self.injectors = {"4": FakeARBInjector(), "8": FakeARBInjector()}
+            self.lora_head = FakeLoRA()
+            self.lora_layers = None
+
+    fake_model = FakeModel()
+    captured = {}
+
+    class FakeEvaluator:
+        def __init__(self, model, tokenizer, config, device=None):
+            pass
+
+        def full_evaluation(
+            self,
+            eval_texts=None,
+            include_prior_logit_analysis: bool = False,
+            base_model=None,
+            base_tokenizer=None,
+        ):
+            captured["gate_multipliers"] = [
+                injector.inject.multipliers[-1]
+                for injector in fake_model.injectors.values()
+            ]
+            captured["lora_multiplier"] = fake_model.lora_head.multipliers[-1]
+            return {"ok": True}
+
+    monkeypatch.setattr(module, "load_config", lambda path: yaml_config)
+    monkeypatch.setattr(module, "get_device", lambda device: "cpu")
+    monkeypatch.setattr(
+        module.GPT2WithARB,
+        "from_exported_model",
+        classmethod(lambda cls, output_dir, device=None: (fake_model, "tokenizer", Config())),
+    )
+    monkeypatch.setattr(module, "ARBEvaluator", FakeEvaluator)
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            str(SCRIPT_PATH),
+            "--config",
+            "configs/360m.yaml",
+            "--model-dir",
+            "trained_model_360m",
+            "--gate-multiplier",
+            "0",
+            "--lora-multiplier",
+            "0",
+        ],
+    )
+
+    module.main()
+
+    assert captured["gate_multipliers"] == [0.0, 0.0]
+    assert captured["lora_multiplier"] == 0.0
+
+
+def test_evaluate_script_runs_gate_sweep_in_flag_order(monkeypatch):
+    module = _load_evaluate_module()
+
+    yaml_config = Config()
+    yaml_config.training.device = "cpu"
+
+    class FakeResultInjector:
+        def __init__(self):
+            self.multipliers = []
+
+        def set_eval_gate_multiplier(self, multiplier):
+            self.multipliers.append(multiplier)
+
+    class FakeARBInjector:
+        def __init__(self):
+            self.inject = FakeResultInjector()
+
+    class FakeModel:
+        def __init__(self):
+            self.injectors = {
+                "4": FakeARBInjector(),
+                "8": FakeARBInjector(),
+            }
+
+    fake_model = FakeModel()
+    captured = {"calls": []}
+
+    class FakeEvaluator:
+        def __init__(self, model, tokenizer, config, device=None):
+            pass
+
+        def full_evaluation(
+            self,
+            eval_texts=None,
+            include_prior_logit_analysis: bool = False,
+            base_model=None,
+            base_tokenizer=None,
+        ):
+            captured["calls"].append(
+                [
+                    injector.inject.multipliers[-1]
+                    for injector in fake_model.injectors.values()
+                ]
+            )
+            return {"ok": len(captured["calls"])}
+
+    monkeypatch.setattr(module, "load_config", lambda path: yaml_config)
+    monkeypatch.setattr(module, "get_device", lambda device: "cpu")
+    monkeypatch.setattr(
+        module.GPT2WithARB,
+        "from_exported_model",
+        classmethod(lambda cls, output_dir, device=None: (fake_model, "tokenizer", Config())),
+    )
+    monkeypatch.setattr(module, "ARBEvaluator", FakeEvaluator)
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            str(SCRIPT_PATH),
+            "--config",
+            "configs/360m.yaml",
+            "--model-dir",
+            "trained_model_360m",
+            "--gate-multiplier",
+            "1.0",
+            "--gate-multiplier",
+            "0.75",
+            "--gate-multiplier",
+            "0.5",
+        ],
+    )
+
+    module.main()
+
+    assert captured["calls"] == [
+        [1.0, 1.0],
+        [0.75, 0.75],
+        [0.5, 0.5],
+    ]
+
+
 def test_evaluate_script_rejects_mismatched_exported_base_model_for_prior_analysis(monkeypatch):
     module = _load_evaluate_module()
 

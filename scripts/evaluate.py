@@ -59,6 +59,45 @@ class BaseModelEvaluatorAdapter:
         return {"loss": outputs.loss, "logits": outputs.logits}
 
 
+def _apply_gate_multiplier(model, multiplier: float) -> None:
+    """Scale all ARB injection gates for evaluation."""
+    raw_model = getattr(model, "model", model)
+    injectors = getattr(raw_model, "injectors", None)
+    if injectors is None:
+        if multiplier == 1.0:
+            return
+        raise ValueError("Model does not expose ARB injectors for gate scaling")
+
+    for injector in injectors.values():
+        injector.inject.set_eval_gate_multiplier(multiplier)
+
+    logger.info("Applied evaluation gate multiplier %.4f to %d injectors", multiplier, len(injectors))
+
+
+def _apply_lora_multiplier(model, multiplier: float) -> None:
+    """Scale all LoRA adapters for evaluation."""
+    raw_model = getattr(model, "model", model)
+    lora_modules = []
+
+    lora_head = getattr(raw_model, "lora_head", None)
+    if lora_head is not None:
+        lora_modules.append(lora_head)
+
+    lora_layers = getattr(raw_model, "lora_layers", None)
+    if lora_layers is not None:
+        lora_modules.extend(lora_layers.values())
+
+    if not lora_modules:
+        if multiplier == 1.0:
+            return
+        raise ValueError("Model does not expose LoRA adapters for LoRA scaling")
+
+    for lora_module in lora_modules:
+        lora_module.set_eval_multiplier(multiplier)
+
+    logger.info("Applied evaluation LoRA multiplier %.4f to %d adapters", multiplier, len(lora_modules))
+
+
 def main():
     parser = argparse.ArgumentParser(description="Evaluate ARB-augmented GPT-2")
     parser.add_argument("--config", type=str, default="configs/default.yaml")
@@ -77,14 +116,27 @@ def main():
                         help="Override evaluation batch size for generation and perplexity")
     parser.add_argument("--prior-logit-analysis", action="store_true",
                         help="Measure frozen-base answer log-probs and correlate them with ARB errors")
+    parser.add_argument("--gate-multiplier", dest="gate_multipliers", action="append", type=float, default=None,
+                        help="Scale the learned ARB injection gate at evaluation time. "
+                             "Repeat the flag to run a sweep, e.g. "
+                             "--gate-multiplier 1.0 --gate-multiplier 0.75 --gate-multiplier 0.5")
+    parser.add_argument("--lora-multiplier", type=float, default=1.0,
+                        help="Scale all LoRA adapters at evaluation time. Use 0 to disable LoRA explicitly.")
     args = parser.parse_args()
 
     if args.base_model_only and args.prior_logit_analysis:
         parser.error("--prior-logit-analysis requires an ARB evaluation run, not --base-model-only")
+    if args.base_model_only and args.gate_multipliers is not None:
+        parser.error("--gate-multiplier requires an ARB evaluation run, not --base-model-only")
+    if args.base_model_only and args.lora_multiplier != 1.0:
+        parser.error("--lora-multiplier requires an ARB/LoRA evaluation run, not --base-model-only")
 
     config = load_config(args.config)
     if args.batch_size is not None:
         config.evaluation.batch_size = args.batch_size
+    gate_multipliers = args.gate_multipliers or [1.0]
+    if any(multiplier < 0.0 for multiplier in gate_multipliers):
+        parser.error("--gate-multiplier must be non-negative")
     device = get_device(config.training.device)
     logger.info(f"Using device: {device}")
 
@@ -175,12 +227,40 @@ def main():
 
     # Run evaluation
     evaluator = ARBEvaluator(model, tokenizer, config.evaluation, device=device)
-    results = evaluator.full_evaluation(
-        eval_texts=eval_texts,
-        include_prior_logit_analysis=args.prior_logit_analysis,
-        base_model=prior_base_model,
-        base_tokenizer=prior_base_tokenizer,
-    )
+    if len(gate_multipliers) == 1:
+        gate_multiplier = gate_multipliers[0]
+        _apply_gate_multiplier(model, gate_multiplier)
+        _apply_lora_multiplier(model, args.lora_multiplier)
+        results = evaluator.full_evaluation(
+            eval_texts=eval_texts,
+            include_prior_logit_analysis=args.prior_logit_analysis,
+            base_model=prior_base_model,
+            base_tokenizer=prior_base_tokenizer,
+        )
+        results["gate_multiplier"] = gate_multiplier
+        results["lora_multiplier"] = args.lora_multiplier
+    else:
+        sweep_results = []
+        for gate_multiplier in gate_multipliers:
+            _apply_gate_multiplier(model, gate_multiplier)
+            _apply_lora_multiplier(model, args.lora_multiplier)
+            run_results = evaluator.full_evaluation(
+                eval_texts=eval_texts,
+                include_prior_logit_analysis=args.prior_logit_analysis,
+                base_model=prior_base_model,
+                base_tokenizer=prior_base_tokenizer,
+            )
+            sweep_results.append(
+                {
+                    "gate_multiplier": gate_multiplier,
+                    "results": run_results,
+                }
+            )
+
+        results = {
+            "lora_multiplier": args.lora_multiplier,
+            "gate_sweep": sweep_results,
+        }
 
     # Print results
     logger.info("\n=== Results ===")

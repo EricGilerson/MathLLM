@@ -21,6 +21,11 @@ class LoRALinear(nn.Module):
         self.base_linear = base_linear
         self.rank = rank
         self.scale = alpha / rank
+        self.register_buffer(
+            "_eval_multiplier",
+            torch.tensor(1.0),
+            persistent=False,
+        )
 
         in_features = base_linear.in_features
         out_features = base_linear.out_features
@@ -28,12 +33,20 @@ class LoRALinear(nn.Module):
         self.lora_B = nn.Parameter(torch.randn(rank, in_features) * 0.01)
         self.lora_A = nn.Parameter(torch.zeros(out_features, rank))
 
+    def set_eval_multiplier(self, multiplier: float) -> None:
+        """Scale LoRA contribution at evaluation time without touching weights."""
+        self._eval_multiplier.fill_(float(multiplier))
+
     def forward(self, x: Tensor, gate: Tensor | None = None) -> Tensor:
         base_out = self.base_linear(x)
         # Compute LoRA path in float32 to avoid overflow on large vocab projections
         x_f = x.float()
         lora_out = (x_f @ self.lora_B.T) @ self.lora_A.T
-        lora_contribution = self.scale * lora_out.to(dtype=base_out.dtype)
+        lora_contribution = (
+            self.scale
+            * self._eval_multiplier.to(dtype=base_out.dtype)
+            * lora_out.to(dtype=base_out.dtype)
+        )
         if gate is not None:
             lora_contribution = lora_contribution * gate
         return base_out + lora_contribution

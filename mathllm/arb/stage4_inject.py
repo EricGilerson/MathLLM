@@ -43,6 +43,11 @@ class ResultInjector(nn.Module):
         super().__init__()
         self.gate_logit = nn.Parameter(torch.tensor(gate_init_logit))
         self.dropout = nn.Dropout(dropout)
+        self.register_buffer(
+            "_eval_gate_multiplier",
+            torch.tensor(1.0),
+            persistent=False,
+        )
 
         if mlp_hidden > 0:
             self.projection = nn.Sequential(
@@ -66,6 +71,12 @@ class ResultInjector(nn.Module):
                 nn.init.normal_(self.projection.weight, mean=0.0, std=init_std)
             nn.init.zeros_(self.projection.bias)
 
+    def set_eval_gate_multiplier(self, multiplier: float) -> None:
+        """Scale the learned gate at evaluation time without changing training state."""
+        if multiplier < 0.0:
+            raise ValueError("Gate multiplier must be non-negative")
+        self._eval_gate_multiplier.fill_(float(multiplier))
+
     def forward(self, results: Tensor, h: Tensor) -> Tensor:
         """Inject results into hidden state via gated residual connection.
 
@@ -83,7 +94,9 @@ class ResultInjector(nn.Module):
             proj_dtype = self.projection.weight.dtype
 
         results = results.to(dtype=proj_dtype)
-        gate = torch.sigmoid(self.gate_logit)
+        gate = torch.sigmoid(self.gate_logit) * self._eval_gate_multiplier.to(
+            dtype=self.gate_logit.dtype
+        )
         delta_h = self.projection(results)
         delta_h = self.dropout(delta_h)
         return h + gate * delta_h.to(dtype=h.dtype)

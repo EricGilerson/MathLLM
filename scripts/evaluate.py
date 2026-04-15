@@ -50,13 +50,13 @@ class BaseModelEvaluatorAdapter:
             pad_token_id=pad_token_id,
         )
 
-    def __call__(self, input_ids, attention_mask, labels):
+    def __call__(self, input_ids, attention_mask, labels=None):
         outputs = self.model(
             input_ids=input_ids,
             attention_mask=attention_mask,
             labels=labels,
         )
-        return {"loss": outputs.loss}
+        return {"loss": outputs.loss, "logits": outputs.logits}
 
 
 def main():
@@ -75,7 +75,12 @@ def main():
                         help="Path to text file with eval texts for perplexity (one per line)")
     parser.add_argument("--batch-size", type=int, default=None,
                         help="Override evaluation batch size for generation and perplexity")
+    parser.add_argument("--prior-logit-analysis", action="store_true",
+                        help="Measure frozen-base answer log-probs and correlate them with ARB errors")
     args = parser.parse_args()
+
+    if args.base_model_only and args.prior_logit_analysis:
+        parser.error("--prior-logit-analysis requires an ARB evaluation run, not --base-model-only")
 
     config = load_config(args.config)
     if args.batch_size is not None:
@@ -84,6 +89,7 @@ def main():
     logger.info(f"Using device: {device}")
 
     model_dir = args.model_dir
+    exported_config = None
     if model_dir is None and args.checkpoint is None and not args.base_model_only:
         configured_model_dir = Path(config.training.final_model_dir)
         if configured_model_dir.is_dir() and (configured_model_dir / EXPORT_CONFIG_FILENAME).exists():
@@ -95,7 +101,7 @@ def main():
 
     if model_dir:
         logger.info(f"Loading exported model from: {model_dir}")
-        model, tokenizer, _ = GPT2WithARB.from_exported_model(
+        model, tokenizer, exported_config = GPT2WithARB.from_exported_model(
             model_dir,
             device=device,
         )
@@ -134,6 +140,32 @@ def main():
 
         model.to(device)
 
+    prior_base_model = None
+    prior_base_tokenizer = None
+    if args.prior_logit_analysis:
+        configured_base_model = config.training.base_model
+        exported_base_model = None
+        if exported_config is not None:
+            exported_base_model = exported_config.training.base_model
+        if exported_base_model and configured_base_model and exported_base_model != configured_base_model:
+            parser.error(
+                "Exported model config base_model does not match YAML config training.base_model "
+                f"({exported_base_model!r} != {configured_base_model!r})"
+            )
+
+        prior_base_model_name = exported_base_model or configured_base_model
+        logger.info("Loading frozen base model for prior-logit analysis: %s", prior_base_model_name)
+        prior_base_tokenizer = AutoTokenizer.from_pretrained(prior_base_model_name)
+        if prior_base_tokenizer.pad_token is None:
+            prior_base_tokenizer.pad_token = prior_base_tokenizer.eos_token
+
+        prior_base_model = AutoModelForCausalLM.from_pretrained(prior_base_model_name)
+        if (
+            getattr(prior_base_model.config, "pad_token_id", None) is None
+            and prior_base_tokenizer.pad_token_id is not None
+        ):
+            prior_base_model.config.pad_token_id = prior_base_tokenizer.pad_token_id
+
     # Load eval texts for perplexity if provided
     eval_texts = None
     if args.eval_texts:
@@ -143,7 +175,12 @@ def main():
 
     # Run evaluation
     evaluator = ARBEvaluator(model, tokenizer, config.evaluation, device=device)
-    results = evaluator.full_evaluation(eval_texts=eval_texts)
+    results = evaluator.full_evaluation(
+        eval_texts=eval_texts,
+        include_prior_logit_analysis=args.prior_logit_analysis,
+        base_model=prior_base_model,
+        base_tokenizer=prior_base_tokenizer,
+    )
 
     # Print results
     logger.info("\n=== Results ===")

@@ -8,6 +8,8 @@ model:
 
 data:
   mixture_file: "pretraining_data/toy_full_75_25.pt"
+  tokenizer_file: "pretraining_data/toy_full_75_25_tokenizer.json"
+  tokenizer_vocab_size: 2048
   prose_documents: 20000
   train_blocks: 200000
   eval_blocks: 5000
@@ -17,7 +19,7 @@ data:
 
 training:
   output_dir: "pretraining_runs/toy_full_75_25_seed20260723"
-  device: "cuda"
+  device: "auto"
   seed: 20260723
   context_length: 128
   batch_size: 32

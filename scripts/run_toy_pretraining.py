@@ -14,8 +14,12 @@ def main() -> None:
     parser.add_argument("--config", default="configs/toy_pretrain_smoke.yaml")
     parser.add_argument("--variant", choices=["baseline", "arb"], required=True)
     parser.add_argument("--prepare-data", action="store_true")
+    parser.add_argument("--device", choices=["auto", "cpu", "mps", "cuda"])
     args = parser.parse_args()
-    metrics = run_training(load_toy_config(args.config), args.variant, prepare=args.prepare_data)
+    config = load_toy_config(args.config)
+    if args.device:
+        config.training.device = args.device
+    metrics = run_training(config, args.variant, prepare=args.prepare_data)
     print(json.dumps(metrics, indent=2))
 
 

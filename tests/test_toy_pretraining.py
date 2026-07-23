@@ -2,21 +2,26 @@
 
 import torch
 
-from mathllm.pretraining.char_tokenizer import CharTokenizer
+from mathllm.pretraining.arithmetic_bpe_tokenizer import ArithmeticBPETokenizer
 from mathllm.pretraining.data import MixtureSpec, build_mixture
-from mathllm.pretraining.experiment import ToyExperimentConfig, build_model
+from mathllm.pretraining.experiment import ToyExperimentConfig, build_model, resolve_device
 
 
-def test_character_tokenizer_keeps_arithmetic_symbols_standalone():
-    tokenizer = CharTokenizer()
+def _tokenizer():
+    return ArithmeticBPETokenizer.train(["Natural-language prose is compressed by BPE.\n", "12+3=15\n"], 128)
+
+
+def test_bpe_tokenizer_keeps_arithmetic_symbols_standalone():
+    tokenizer = _tokenizer()
     ids = tokenizer.encode("12+3=")
 
     assert len(ids) == 5
     assert tokenizer.decode(ids) == "12+3="
+    assert ids == [tokenizer.token_to_id[character] for character in "12+3="]
 
 
 def test_mixture_has_exact_train_and_eval_block_ratios():
-    tokenizer = CharTokenizer()
+    tokenizer = _tokenizer()
     spec = MixtureSpec(
         context_length=8,
         train_blocks=12,
@@ -36,7 +41,7 @@ def test_mixture_has_exact_train_and_eval_block_ratios():
 
 def test_toy_baseline_and_arb_are_fully_trainable():
     config = ToyExperimentConfig()
-    tokenizer = CharTokenizer()
+    tokenizer = _tokenizer()
     baseline = build_model(config, "baseline", tokenizer)
     arb = build_model(config, "arb", tokenizer)
 
@@ -45,3 +50,7 @@ def test_toy_baseline_and_arb_are_fully_trainable():
     assert sum(parameter.numel() for parameter in arb.parameters()) > sum(
         parameter.numel() for parameter in baseline.parameters()
     )
+
+
+def test_auto_device_is_a_supported_backend():
+    assert str(resolve_device("auto")) in {"cpu", "cuda", "mps"}

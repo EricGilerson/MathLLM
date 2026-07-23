@@ -8,6 +8,8 @@ model:
 
 data:
   mixture_file: "pretraining_data/toy_smoke.pt"
+  tokenizer_file: "pretraining_data/toy_smoke_tokenizer.json"
+  tokenizer_vocab_size: 512
   prose_documents: 256
   train_blocks: 256
   eval_blocks: 64
@@ -17,7 +19,7 @@ data:
 
 training:
   output_dir: "pretraining_runs/toy_smoke"
-  device: "cpu"
+  device: "auto"
   seed: 20260723
   context_length: 64
   batch_size: 4

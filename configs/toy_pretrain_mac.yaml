@@ -1,0 +1,31 @@
+# Mac-friendly substantive pilot: roughly 20M decoder parameters before ARB.
+# At 20,000 steps it presents 41.3M tokens to each variant. Start here on MPS;
+# it is a controlled pilot, not a replacement for the three-seed CUDA protocol.
+model:
+  n_layer: 6
+  n_embd: 512
+  n_head: 8
+  n_inner: 2048
+
+data:
+  mixture_file: "pretraining_data/toy_mac_20m_75_25.pt"
+  tokenizer_file: "pretraining_data/toy_mac_20m_75_25_tokenizer.json"
+  tokenizer_vocab_size: 2048
+  prose_documents: 5000
+  train_blocks: 100000
+  eval_blocks: 2000
+  arithmetic_token_fraction: 0.25
+  max_digits: 3
+  invocation_fraction: 0.25
+
+training:
+  output_dir: "pretraining_runs/toy_mac_20m_75_25_seed20260723"
+  device: "auto"
+  seed: 20260723
+  context_length: 128
+  batch_size: 16
+  learning_rate: 0.0003
+  weight_decay: 0.01
+  max_steps: 20000
+  eval_batches: 32
+  eval_cases: 100

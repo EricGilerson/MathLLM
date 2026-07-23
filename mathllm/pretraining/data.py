@@ -9,7 +9,7 @@ from pathlib import Path
 
 import torch
 
-from mathllm.pretraining.char_tokenizer import CharTokenizer
+from mathllm.pretraining.arithmetic_bpe_tokenizer import ArithmeticBPETokenizer
 
 
 @dataclass(frozen=True)
@@ -69,7 +69,7 @@ def arithmetic_texts(count: int, seed: int, max_digits: int, invocation_fraction
     return texts
 
 
-def _blocks_from_texts(texts: list[str], tokenizer: CharTokenizer, block_length: int) -> list[list[int]]:
+def _blocks_from_texts(texts: list[str], tokenizer: ArithmeticBPETokenizer, block_length: int) -> list[list[int]]:
     stream = []
     for text in texts:
         stream.extend(tokenizer.encode(text))
@@ -81,7 +81,7 @@ def _blocks_from_texts(texts: list[str], tokenizer: CharTokenizer, block_length:
     return blocks
 
 
-def build_mixture(spec: MixtureSpec, prose_documents: list[str], tokenizer: CharTokenizer) -> dict[str, object]:
+def build_mixture(spec: MixtureSpec, prose_documents: list[str], tokenizer: ArithmeticBPETokenizer) -> dict[str, object]:
     """Build fixed-length blocks whose source mix is exact by block/token count."""
     if not 0.0 < spec.arithmetic_token_fraction < 1.0:
         raise ValueError("arithmetic_token_fraction must be between 0 and 1")
@@ -91,19 +91,37 @@ def build_mixture(spec: MixtureSpec, prose_documents: list[str], tokenizer: Char
     train_prose_blocks = spec.train_blocks - train_arithmetic_blocks
     eval_prose_blocks = spec.eval_blocks - eval_arithmetic_blocks
     needed_texts = max((spec.train_blocks + spec.eval_blocks) * 3, 256)
-    arithmetic = arithmetic_texts(needed_texts, spec.seed + 1, spec.max_digits, spec.invocation_fraction)
-    prose = [document + "\n" for document in prose_documents]
+    # Keep held-out sources genuinely disjoint rather than merely selecting
+    # different blocks from one long token stream.
+    if len(prose_documents) < 2:
+        # The repository fallback can be a single long document. This keeps a
+        # smoke test usable; real runs use many WikiText documents and are
+        # disjoint by document below.
+        train_prose = [document + "\n" for document in prose_documents]
+        eval_prose = list(train_prose)
+        prose_split = "shared fallback document only"
+    else:
+        split = max(1, int(len(prose_documents) * 0.9))
+        if split == len(prose_documents):
+            split -= 1
+        train_prose = [document + "\n" for document in prose_documents[:split]]
+        eval_prose = [document + "\n" for document in prose_documents[split:]]
+        prose_split = "disjoint prose documents"
+    train_arithmetic = arithmetic_texts(needed_texts, spec.seed + 1, spec.max_digits, spec.invocation_fraction)
+    eval_arithmetic = arithmetic_texts(needed_texts, spec.seed + 2, spec.max_digits, spec.invocation_fraction)
     block_length = spec.context_length
-    prose_pool = _blocks_from_texts(prose, tokenizer, block_length)
-    arithmetic_pool = _blocks_from_texts(arithmetic, tokenizer, block_length)
+    train_prose_pool = _blocks_from_texts(train_prose, tokenizer, block_length)
+    eval_prose_pool = _blocks_from_texts(eval_prose, tokenizer, block_length)
+    train_arithmetic_pool = _blocks_from_texts(train_arithmetic, tokenizer, block_length)
+    eval_arithmetic_pool = _blocks_from_texts(eval_arithmetic, tokenizer, block_length)
 
     def take(pool, count):
         return [pool[index % len(pool)] for index in range(count)]
 
-    train_records = [(block, 0) for block in take(prose_pool, train_prose_blocks)]
-    train_records += [(block, 1) for block in take(arithmetic_pool, train_arithmetic_blocks)]
-    eval_records = [(block, 0) for block in take(prose_pool[train_prose_blocks:] or prose_pool, eval_prose_blocks)]
-    eval_records += [(block, 1) for block in take(arithmetic_pool[train_arithmetic_blocks:] or arithmetic_pool, eval_arithmetic_blocks)]
+    train_records = [(block, 0) for block in take(train_prose_pool, train_prose_blocks)]
+    train_records += [(block, 1) for block in take(train_arithmetic_pool, train_arithmetic_blocks)]
+    eval_records = [(block, 0) for block in take(eval_prose_pool, eval_prose_blocks)]
+    eval_records += [(block, 1) for block in take(eval_arithmetic_pool, eval_arithmetic_blocks)]
     rng.shuffle(train_records)
     rng.shuffle(eval_records)
     return {
@@ -120,6 +138,7 @@ def build_mixture(spec: MixtureSpec, prose_documents: list[str], tokenizer: Char
             "train_prose_blocks": train_prose_blocks,
             "eval_arithmetic_blocks": eval_arithmetic_blocks,
             "eval_prose_blocks": eval_prose_blocks,
+            "source_split": f"{prose_split}; independent arithmetic seeds",
             "seed": spec.seed,
         },
     }

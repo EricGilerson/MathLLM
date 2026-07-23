@@ -12,12 +12,13 @@ import torch
 import torch.nn.functional as F
 import yaml
 from torch import nn
+from tqdm.auto import tqdm
 from transformers import GPT2Config, GPT2LMHeadModel
 
 from mathllm.config import ARBConfig, Config, RNSConfig, TrainingConfig
 from mathllm.model.gpt2_arb import GPT2WithARB
-from mathllm.pretraining.char_tokenizer import CharTokenizer
-from mathllm.pretraining.data import MixtureSpec, build_mixture, load_prose_documents, save_mixture
+from mathllm.pretraining.arithmetic_bpe_tokenizer import ArithmeticBPETokenizer
+from mathllm.pretraining.data import MixtureSpec, arithmetic_texts, build_mixture, load_prose_documents, save_mixture
 
 
 @dataclass
@@ -31,6 +32,8 @@ class ToyModelConfig:
 @dataclass
 class ToyDataConfig:
     mixture_file: str = "pretraining_data/toy_smoke.pt"
+    tokenizer_file: str = "pretraining_data/toy_smoke_tokenizer.json"
+    tokenizer_vocab_size: int = 1024
     prose_documents: int = 256
     train_blocks: int = 256
     eval_blocks: int = 64
@@ -49,6 +52,7 @@ class ToyTrainingConfig:
     learning_rate: float = 3e-4
     weight_decay: float = 0.01
     max_steps: int = 3
+    log_every: int = 25
     eval_batches: int = 4
     eval_cases: int = 8
 
@@ -77,8 +81,17 @@ def load_toy_config(path: str | Path) -> ToyExperimentConfig:
 
 
 def prepare_data(config: ToyExperimentConfig) -> dict[str, object]:
-    tokenizer = CharTokenizer()
     prose = load_prose_documents(config.data.prose_documents)
+    # Train BPE on the same distribution family, while the mixture builder
+    # itself keeps train/eval source texts disjoint.
+    tokenizer_training_texts = prose + arithmetic_texts(
+        max(4096, config.data.prose_documents),
+        config.training.seed,
+        config.data.max_digits,
+        config.data.invocation_fraction,
+    )
+    tokenizer = ArithmeticBPETokenizer.train(tokenizer_training_texts, config.data.tokenizer_vocab_size)
+    tokenizer.save(config.data.tokenizer_file)
     spec = MixtureSpec(
         context_length=config.training.context_length,
         train_blocks=config.data.train_blocks,
@@ -93,7 +106,7 @@ def prepare_data(config: ToyExperimentConfig) -> dict[str, object]:
     return mixture
 
 
-def _gpt2_config(tokenizer: CharTokenizer, model: ToyModelConfig, context_length: int) -> GPT2Config:
+def _gpt2_config(tokenizer: ArithmeticBPETokenizer, model: ToyModelConfig, context_length: int) -> GPT2Config:
     config = GPT2Config(
         vocab_size=tokenizer.vocab_size,
         n_positions=context_length + 1,
@@ -106,13 +119,16 @@ def _gpt2_config(tokenizer: CharTokenizer, model: ToyModelConfig, context_length
         eos_token_id=tokenizer.eos_token_id,
         pad_token_id=tokenizer.pad_token_id,
     )
-    config.loss_type = "ForCausalLMLoss"
+    config.loss_type = "ForCausalLM"
     return config
 
 
-def build_model(config: ToyExperimentConfig, variant: str, tokenizer: CharTokenizer) -> nn.Module:
+def build_model(config: ToyExperimentConfig, variant: str, tokenizer: ArithmeticBPETokenizer) -> nn.Module:
     torch.manual_seed(config.training.seed)
     base = GPT2LMHeadModel(_gpt2_config(tokenizer, config.model, config.training.context_length))
+    # Transformers reads this from the model instance rather than config on
+    # recent versions; set both to retain the explicit causal-LM objective.
+    base.loss_type = "ForCausalLM"
     if variant == "baseline":
         return base
     if variant != "arb":
@@ -160,7 +176,7 @@ def _evaluate_loss(model: nn.Module, sequences: torch.Tensor, sources: torch.Ten
     return sum(losses) / max(len(losses), 1)
 
 
-def _generate(model: nn.Module, tokenizer: CharTokenizer, prompt: str, max_new_tokens: int, device: torch.device) -> str:
+def _generate(model: nn.Module, tokenizer: ArithmeticBPETokenizer, prompt: str, max_new_tokens: int, device: torch.device) -> str:
     input_ids = tokenizer.encode(prompt, return_tensors="pt").to(device)
     with torch.inference_mode():
         if isinstance(model, GPT2WithARB):
@@ -170,7 +186,7 @@ def _generate(model: nn.Module, tokenizer: CharTokenizer, prompt: str, max_new_t
     return tokenizer.decode(output[0], skip_special_tokens=True)
 
 
-def _arithmetic_metrics(model: nn.Module, tokenizer: CharTokenizer, config: ToyExperimentConfig, device: torch.device) -> dict[str, float]:
+def _arithmetic_metrics(model: nn.Module, tokenizer: ArithmeticBPETokenizer, config: ToyExperimentConfig, device: torch.device) -> dict[str, float]:
     from mathllm.pretraining.data import _sample_expression
 
     rng = random.Random(config.training.seed + 99)
@@ -190,13 +206,28 @@ def _arithmetic_metrics(model: nn.Module, tokenizer: CharTokenizer, config: ToyE
     return {"direct_arithmetic_accuracy": direct_correct / n, "equation_invocation_accuracy": invocation_correct / n}
 
 
+def resolve_device(requested: str) -> torch.device:
+    """Choose CUDA, then Apple MPS, then CPU for an ``auto`` request."""
+    if requested == "auto":
+        if torch.cuda.is_available():
+            return torch.device("cuda")
+        if torch.backends.mps.is_available():
+            return torch.device("mps")
+        return torch.device("cpu")
+    if requested == "mps" and not torch.backends.mps.is_available():
+        raise RuntimeError("MPS was requested but is unavailable in this PyTorch build")
+    if requested == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError("CUDA was requested but is unavailable")
+    return torch.device(requested)
+
+
 def run_training(config: ToyExperimentConfig, variant: str, prepare: bool = False) -> dict[str, object]:
     torch.manual_seed(config.training.seed)
     random.seed(config.training.seed)
     mixture_path = Path(config.data.mixture_file)
     mixture = prepare_data(config) if prepare or not mixture_path.exists() else torch.load(mixture_path, map_location="cpu", weights_only=False)
-    tokenizer = CharTokenizer()
-    device = torch.device(config.training.device)
+    tokenizer = ArithmeticBPETokenizer.from_file(config.data.tokenizer_file)
+    device = resolve_device(config.training.device)
     model = build_model(config, variant, tokenizer).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=config.training.learning_rate, weight_decay=config.training.weight_decay)
     sequences = mixture["train_input_ids"]
@@ -204,7 +235,13 @@ def run_training(config: ToyExperimentConfig, variant: str, prepare: bool = Fals
     order = torch.randperm(len(sequences), generator=generator)
     losses = []
     model.train()
-    for step in range(config.training.max_steps):
+    progress = tqdm(
+        range(config.training.max_steps),
+        desc=f"{variant} training ({device.type})",
+        unit="step",
+        dynamic_ncols=True,
+    )
+    for step in progress:
         start = (step * config.training.batch_size) % len(order)
         indices = order[start:start + config.training.batch_size]
         if len(indices) < config.training.batch_size:
@@ -215,7 +252,10 @@ def run_training(config: ToyExperimentConfig, variant: str, prepare: bool = Fals
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         optimizer.step()
-        losses.append(float(loss.item()))
+        loss_value = float(loss.item())
+        losses.append(loss_value)
+        if (step + 1) % config.training.log_every == 0 or step == 0 or step + 1 == config.training.max_steps:
+            progress.set_postfix(loss=f"{loss_value:.4f}")
 
     eval_ids = mixture["eval_input_ids"]
     eval_sources = mixture["eval_sources"]
@@ -227,6 +267,7 @@ def run_training(config: ToyExperimentConfig, variant: str, prepare: bool = Fals
         "heldout_prose_ppl": math.exp(prose_nll),
         "heldout_arithmetic_nll": arithmetic_nll,
         "parameter_count": sum(parameter.numel() for parameter in model.parameters()),
+        "device": str(device),
         **_arithmetic_metrics(model, tokenizer, config, device),
     }
     output_dir = Path(config.training.output_dir) / variant

@@ -70,6 +70,8 @@ def main() -> None:
                         help="Add this many non-empty WikiText-103 test documents from the local cache.")
     parser.add_argument("--swebench-limit", type=int, default=0,
                         help="Add this many SWE-bench Lite test patches from the local cache.")
+    parser.add_argument("--swebench-offset", type=int, default=0,
+                        help="Starting SWE-bench Lite test-patch index.")
     parser.add_argument("--max-tokens", type=int, default=128,
                         help="Score at most this many tokens from each example.")
     parser.add_argument("--wikitext-ppl-limit", type=int, default=0,
@@ -77,6 +79,8 @@ def main() -> None:
     parser.add_argument("--wikitext-offset", type=int, default=0,
                         help="Starting non-empty WikiText test-document index for corpus or PPL slices.")
     parser.add_argument("--ppl-window", type=int, default=256)
+    parser.add_argument("--ppl-max-document-tokens", type=int, default=0,
+                        help="If positive, truncate each WikiText document before PPL scoring.")
     args = parser.parse_args()
 
     device = torch.device(args.device)
@@ -101,7 +105,7 @@ def main() -> None:
             dataset = load_dataset("princeton-nlp/SWE-bench_Lite", split="test")
             cases["swebench_lite_patches"] = [
                 row["patch"] for row in dataset if row["patch"].strip()
-            ][:args.swebench_limit]
+            ][args.swebench_offset:args.swebench_offset + args.swebench_limit]
 
     rows = []
     for category, texts in cases.items():
@@ -150,6 +154,14 @@ def main() -> None:
         ppl_texts = wikitext_texts[
             args.wikitext_offset:args.wikitext_offset + args.wikitext_ppl_limit
         ]
+        if args.ppl_max_document_tokens:
+            ppl_texts = [
+                tokenizer.decode(
+                    tokenizer.encode(text, add_special_tokens=False)[:args.ppl_max_document_tokens],
+                    skip_special_tokens=True,
+                )
+                for text in ppl_texts
+            ]
         base_ppl = compute_perplexity(
             model.base_model, tokenizer, ppl_texts, device=device,
             max_length=args.ppl_window, stride=args.ppl_window,
@@ -162,6 +174,7 @@ def main() -> None:
             "corpus": "WikiText-103 test", "documents": len(ppl_texts),
             "document_offset": args.wikitext_offset,
             "max_length": args.ppl_window, "stride": args.ppl_window,
+            "max_document_tokens": args.ppl_max_document_tokens or None,
             "base": base_ppl, "arb": arb_ppl,
             "perplexity_delta": arb_ppl["perplexity"] - base_ppl["perplexity"],
             "avg_nll_delta": arb_ppl["avg_nll"] - base_ppl["avg_nll"],

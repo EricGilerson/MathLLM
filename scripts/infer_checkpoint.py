@@ -195,6 +195,9 @@ def load_checkpointed_model(
     if "lora_layers_state" in ckpt and model.lora_layers is not None:
         model.lora_layers.load_state_dict(ckpt["lora_layers_state"])
 
+    # Refresh tokenizer-derived tables after loading legacy checkpoint buffers.
+    model.build_token_digit_tables(tokenizer)
+
     model.to(device)
     model.eval()
     return model, tokenizer, config, resolved_checkpoint

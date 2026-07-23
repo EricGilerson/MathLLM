@@ -190,6 +190,10 @@ def main():
             if "lora_layers_state" in ckpt and model.lora_layers is not None:
                 model.lora_layers.load_state_dict(ckpt["lora_layers_state"])
 
+            # Checkpoints persist legacy token tables; refresh derived
+            # tokenizer classification after restoring learned weights.
+            model.build_token_digit_tables(tokenizer)
+
         model.to(device)
 
     prior_base_model = None

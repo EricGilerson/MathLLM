@@ -10,9 +10,10 @@ Stages 1-3 produce identical output regardless of transformer depth, so they
 run once per forward pass in ``ARBComputeCore``.  Stage 4 runs at each
 configured layer position via per-layer ``ARBInjector`` instances.
 
-Smart activation: injection only fires at the **last** ``=`` in the sequence
-and its contiguous digit suffix — so already-answered equations in context
-(``3+5=8, now compute 7*9=``) don't get spurious injection.
+Smart activation: injection only fires for a supported direct ``A op B =``
+expression and its contiguous answer-digit suffix. The same detection gates the
+LM-head adapter, so isolated equals signs and unrelated operators do not enable
+learned arithmetic behavior.
 """
 
 from __future__ import annotations
@@ -43,8 +44,11 @@ class ComputeResult:
     results: Tensor   # [B, S, K+1] MSB-first answer digits + sign
     d_a: Tensor       # [B, S, K]   operand A digit vector
     d_b: Tensor       # [B, S, K]   operand B digit vector
-    has_eq: Tensor    # [B]         whether each sequence contains '='
-    eq_pos: Tensor    # [B]         position of last '=' (or S if absent)
+    has_eq: Tensor    # [B]         whether each sequence has a valid equation
+    eq_pos: Tensor    # [B]         selected valid '=' position (or S if absent)
+    candidate_eq_count: Tensor  # [B] total '=' tokens, for instrumentation
+    valid_eq_count: Tensor      # [B] valid direct-equation tokens
+    generation_ready: Tensor    # [B] valid equation ends at prompt boundary
 
 
 class ARBComputeCore(nn.Module):
@@ -186,7 +190,12 @@ class ARBComputeCore(nn.Module):
         )
         return result.to(device=device, dtype=a_circle.dtype)
 
-    def _select_operation_result(self, results: Tensor, input_ids: Tensor) -> Tensor:
+    def _select_operation_result(
+        self,
+        results: Tensor,
+        input_ids: Tensor,
+        op_pos: Tensor | None = None,
+    ) -> Tensor:
         """Extract the selected operation's digits into a fixed-position vector.
 
         Input:  [B, S, 5K+1] — all operations concatenated
@@ -200,7 +209,8 @@ class ARBComputeCore(nn.Module):
         K = self.num_digits
         device = results.device
 
-        op_pos = self.extract._find_operator_positions(input_ids)
+        if op_pos is None:
+            op_pos = self.extract._find_operator_positions(input_ids)
         op_tokens = input_ids.gather(1, op_pos.unsqueeze(1)).squeeze(1)
         op_clamped = op_tokens.clamp(0, self.extract.op_token_to_result_idx.size(0) - 1)
         op_indices = self.extract.op_token_to_result_idx[op_clamped]
@@ -268,16 +278,13 @@ class ARBComputeCore(nn.Module):
         B, S = input_ids.shape
         device = input_ids.device
 
-        # Find '=' position (used by both compute core and injectors)
-        eq_present = (input_ids == self.eq_token_id)
-        has_eq = eq_present.any(dim=1)
-        # Use the LAST '=' in the sequence (not argmax which gives the first)
-        # Flip, argmax on flipped gives first-from-end, then convert back
-        eq_pos = torch.where(
-            has_eq,
-            S - 1 - eq_present.long().flip(dims=[1]).argmax(dim=1),
-            torch.full((B,), S, device=device),
-        )
+        # One strict token-level decision is shared by extraction, injection,
+        # and the LM-head adapter. This prevents '=' alone from activating the
+        # learned arithmetic pathway.
+        detection = self.extract.find_valid_equations(input_ids, self.eq_token_id)
+        has_eq = detection.has_valid_equation
+        eq_pos = detection.eq_pos
+        generation_ready = has_eq & (eq_pos == S - 1)
 
         # Generation cache: return cached results on step 2+
         if self._generation_mode and self._cached_results is not None:
@@ -290,10 +297,15 @@ class ARBComputeCore(nn.Module):
                 d_b=d_b,
                 has_eq=self._cached_has_eq if self._cached_has_eq is not None else has_eq,
                 eq_pos=eq_pos,
+                candidate_eq_count=detection.candidate_eq_count,
+                valid_eq_count=detection.valid_eq_count,
+                generation_ready=self._cached_has_eq if self._cached_has_eq is not None else generation_ready,
             )
 
         # Stage 1: Deterministic extraction via token lookup
-        d_a, d_b, _, _ = self.extract(None, input_ids, attention_mask)
+        d_a, d_b, _, _ = self.extract(
+            None, input_ids, attention_mask, op_pos=detection.op_pos,
+        )
 
         # Stage 2: Encode to RNS circles
         a_circle = self.encode(d_a)
@@ -304,7 +316,10 @@ class ARBComputeCore(nn.Module):
         all_results = self._decode_to_digits(a_circle, b_circle, b_exp_circle)
 
         # Select the result matching the detected operator
-        results = self._select_operation_result(all_results, input_ids)
+        results = self._select_operation_result(
+            all_results, input_ids, op_pos=detection.op_pos,
+        )
+        results = results * has_eq.to(dtype=results.dtype).view(B, 1, 1)
 
         # Reorder to MSB-first for left-to-right generation
         results = self._reorder_to_msb_first(results)
@@ -312,7 +327,7 @@ class ARBComputeCore(nn.Module):
         # Cache for generation mode (step 2+ will reuse)
         if self._generation_mode and self._cached_results is None:
             self._cached_results = results[:, 0, :].clone()
-            self._cached_has_eq = has_eq.clone()
+            self._cached_has_eq = generation_ready.clone()
             self._generation_offset = 1
 
         return ComputeResult(
@@ -321,6 +336,9 @@ class ARBComputeCore(nn.Module):
             d_b=d_b,
             has_eq=has_eq,
             eq_pos=eq_pos,
+            candidate_eq_count=detection.candidate_eq_count,
+            valid_eq_count=detection.valid_eq_count,
+            generation_ready=generation_ready,
         )
 
 

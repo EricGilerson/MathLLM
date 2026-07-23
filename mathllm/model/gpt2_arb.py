@@ -292,15 +292,18 @@ class TransformerWithARB(nn.Module):
         """Warm runtime-only buffers that are not registered module state."""
         self.compute_core.prepare_for_device(device)
 
-    def _compute_lora_gate(self, input_ids: Tensor) -> Tensor | None:
-        """Compute per-position LoRA gate based on '=' token position.
+    def _compute_lora_gate(
+        self,
+        input_ids: Tensor,
+        has_valid_equation: Tensor,
+        eq_pos: Tensor,
+        generation_ready: Tensor,
+    ) -> Tensor | None:
+        """Compute the LM-head LoRA gate from the shared equation decision.
 
-        Returns [B, S, 1] float tensor: 1.0 at positions >= '=' token,
-        0.0 before it. This matches the ARB's inject_mask so the LoRA
-        is only active where ARB results are injected.
-
-        During generation step 2+, returns cached [B, 1, 1] gate
-        (1.0 if prompt had '=', 0.0 otherwise).
+        The gate covers only the selected ``=`` and its contiguous answer-digit
+        suffix. During cached generation it is enabled only when the original
+        prompt ended with a valid direct equation.
         """
         if self.lora_head is None:
             return None
@@ -311,19 +314,24 @@ class TransformerWithARB(nn.Module):
 
         B, S = input_ids.shape
         device = input_ids.device
-        eq_present = (input_ids == self._eq_token_id)  # [B, S]
-        has_eq = eq_present.any(dim=1)  # [B]
-        eq_pos = torch.where(
-            has_eq,
-            eq_present.long().argmax(dim=1),
-            torch.full((B,), S, device=device),
-        )  # [B]
-        positions = torch.arange(S, device=device).unsqueeze(0)  # [1, S]
-        gate = (positions >= eq_pos.unsqueeze(1)).float().unsqueeze(2)  # [B, S, 1]
+        positions = torch.arange(S, device=device).unsqueeze(0).expand(B, -1)
+        at_eq = positions == eq_pos.unsqueeze(1)
+        after_eq = positions > eq_pos.unsqueeze(1)
+        ids_clamped = input_ids.clamp(0, self.compute_core.extract.token_digit_value.size(0) - 1)
+        is_digit = self.compute_core.extract.token_digit_value[ids_clamped] >= 0
+        first_non_digit = torch.where(
+            after_eq & ~is_digit,
+            positions,
+            torch.full_like(positions, S),
+        ).amin(dim=1)
+        answer_zone = at_eq | (after_eq & (positions < first_non_digit.unsqueeze(1)))
+        gate = (
+            answer_zone.float() * has_valid_equation.float().unsqueeze(1)
+        ).unsqueeze(2)
 
         # Cache per-sequence gate for generation step 2+
         if self._generation_mode:
-            self._cached_lora_gate = has_eq.float().view(-1, 1, 1)
+            self._cached_lora_gate = generation_ready.float().view(-1, 1, 1)
 
         return gate
 
@@ -465,7 +473,9 @@ class TransformerWithARB(nn.Module):
             arb_extractions[last_arb_pos] = (cr.d_a, cr.d_b, cr.results)
 
         # LM head (with optional LoRA, gated by arithmetic detection)
-        lora_gate = self._compute_lora_gate(input_ids)
+        lora_gate = self._compute_lora_gate(
+            input_ids, cr.has_eq, cr.eq_pos, cr.generation_ready,
+        )
         if self.lora_head is not None:
             logits = self.lora_head(hidden_states, gate=lora_gate)
         else:
@@ -477,6 +487,12 @@ class TransformerWithARB(nn.Module):
             "loss": loss,
             "logits": logits,
             "arb_extractions": arb_extractions,
+            "arb_detection": {
+                "has_valid_equation": cr.has_eq,
+                "eq_pos": cr.eq_pos,
+                "candidate_eq_count": cr.candidate_eq_count,
+                "valid_eq_count": cr.valid_eq_count,
+            },
         }
         if use_cache:
             result["past_key_values"] = (
@@ -591,7 +607,9 @@ class TransformerWithARB(nn.Module):
             arb_extractions[last_arb_pos] = (cr.d_a, cr.d_b, cr.results)
 
         # LM head (with optional LoRA, gated by arithmetic detection)
-        lora_gate = self._compute_lora_gate(input_ids)
+        lora_gate = self._compute_lora_gate(
+            input_ids, cr.has_eq, cr.eq_pos, cr.generation_ready,
+        )
         if self.lora_head is not None:
             logits = self.lora_head(hidden_states, gate=lora_gate)
         else:
@@ -603,6 +621,12 @@ class TransformerWithARB(nn.Module):
             "loss": loss,
             "logits": logits,
             "arb_extractions": arb_extractions,
+            "arb_detection": {
+                "has_valid_equation": cr.has_eq,
+                "eq_pos": cr.eq_pos,
+                "candidate_eq_count": cr.candidate_eq_count,
+                "valid_eq_count": cr.valid_eq_count,
+            },
         }
         if use_cache:
             result["past_key_values"] = cache
@@ -718,8 +742,6 @@ class TransformerWithARB(nn.Module):
         digit_lookup = self.compute_core.extract.token_digit_value  # [V], -1 = not a digit
         B = input_ids.shape[0]
         device = input_ids.device
-        answer_started = torch.zeros(B, dtype=torch.bool, device=device)
-
         try:
             for _ in range(max_new_tokens):
                 cache_len = cache.get_seq_length() if cache else 0
@@ -760,15 +782,15 @@ class TransformerWithARB(nn.Module):
 
                 generated = torch.cat([generated, next_token], dim=1)
 
-                # Dynamic LoRA/injection gating: turn off after answer ends
-                # Answer = contiguous digit tokens after '='. Once a non-digit
-                # is generated, revert to pure base model for the rest.
+                # Dynamic LoRA/injection gating: a generation-mode ARB is only
+                # armed for a prompt ending in a valid equation. The first
+                # non-digit after '=' ends that answer span, including when it
+                # is the first generated token.
                 if self._cached_lora_gate is not None and self._cached_lora_gate.any():
                     tok_ids = next_token.squeeze(-1)  # [B]
                     clamped = tok_ids.clamp(0, digit_lookup.size(0) - 1)
                     is_digit = digit_lookup[clamped] >= 0  # [B]
-                    answer_started = answer_started | is_digit
-                    answer_ended = answer_started & ~is_digit  # [B]
+                    answer_ended = ~is_digit  # [B]
                     if answer_ended.any():
                         # Turn off LoRA gate for finished elements
                         gate = self._cached_lora_gate.view(B)  # [B]
@@ -853,6 +875,11 @@ class TransformerWithARB(nn.Module):
             weights_only=False,
         )
         model.load_state_dict(state_dict)
+        # Token classification is derived from the runtime tokenizer. Older
+        # exports persist legacy operator tables, so rebuild after loading to
+        # retain whitespace-prefixed operator/equality variants.
+        if hasattr(model, "injectors") and len(model.injectors) > 0:
+            model.build_token_digit_tables(tokenizer)
         if device is not None:
             model.to(device)
         return model, tokenizer, config

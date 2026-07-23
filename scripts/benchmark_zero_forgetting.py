@@ -79,6 +79,9 @@ def _load_arb_model(args, config, device: torch.device):
         if "lora_layers_state" in ckpt and model.lora_layers is not None:
             model.lora_layers.load_state_dict(ckpt["lora_layers_state"])
 
+        # Refresh tokenizer-derived tables after loading legacy checkpoint buffers.
+        model.build_token_digit_tables(tokenizer)
+
     model.to(device)
     return model, tokenizer, args.checkpoint
 

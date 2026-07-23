@@ -1,10 +1,14 @@
 """Tests for the complete Arithmetic Residual Block."""
 
+from types import SimpleNamespace
+
 import torch
 
 from mathllm.arb.arb_module import ArithmeticResidualBlock, DigitSelector
 from mathllm.arb.constants import DEFAULT_PRIMES
+from mathllm.arb.stage1_extract import OperandExtractor
 from mathllm.arb.stage4_inject import ResultInjector
+from mathllm.model.gpt2_arb import GPT2WithARB
 
 # Token IDs for operators in the test vocabulary (0-99)
 _OP_TOKENS = {'+': 10, '-': 12, '*': 14, '^': 16, '/': 18}
@@ -32,6 +36,11 @@ def _build_test_arb(hidden_dim=64, with_op_selection=False, **kwargs):
     for tid in _OP_TOKENS.values():
         op_ids[tid] = True
     arb.extract.is_operator = op_ids
+    number_ids = torch.ones(100, dtype=torch.bool)
+    number_ids[list(_OP_TOKENS.values())] = False
+    number_ids[28] = False
+    number_ids[99] = False
+    arb.extract.is_number_token = number_ids
 
     if with_op_selection:
         # Build the operator-to-result-index table (matches _decode_to_digits order)
@@ -44,6 +53,110 @@ def _build_test_arb(hidden_dim=64, with_op_selection=False, **kwargs):
         )
 
     return arb
+
+
+def _build_per_digit_extractor() -> OperandExtractor:
+    """Build a minimal per-digit extractor for equation-detection tests."""
+    extractor = OperandExtractor(hidden_dim=8, num_digits=4)
+    digit_values = torch.full((32,), -1, dtype=torch.long)
+    for value in range(10):
+        digit_values[value] = value
+    extractor.token_digit_value = digit_values
+    extractor.is_operator = torch.zeros(32, dtype=torch.bool)
+    extractor.is_operator[_OP_TOKENS['+']] = True
+    extractor.is_operator[_OP_TOKENS['-']] = True
+    extractor.is_operator[_OP_TOKENS['*']] = True
+    extractor.is_operator[_OP_TOKENS['/']] = True
+    extractor.is_whitespace_token = torch.zeros(32, dtype=torch.bool)
+    extractor.is_whitespace_token[29] = True
+    extractor._per_digit = True
+    return extractor
+
+
+class TestValidEquationDetection:
+    def test_selects_last_complete_direct_equation(self):
+        extractor = _build_per_digit_extractor()
+        # 3+5=8, then 7*9= (token 28 is '=')
+        ids = torch.tensor([[3, 10, 5, 28, 8, 30, 7, 14, 9, 28]])
+        detection = extractor.find_valid_equations(ids, eq_token_id=28)
+
+        assert detection.has_valid_equation.tolist() == [True]
+        assert detection.eq_pos.tolist() == [9]
+        assert detection.op_pos.tolist() == [7]
+        assert detection.candidate_eq_count.tolist() == [2]
+        assert detection.valid_eq_count.tolist() == [2]
+
+    def test_rejects_isolated_equals_and_malformed_forms(self):
+        extractor = _build_per_digit_extractor()
+        ids = torch.tensor([
+            [28, 20, 20, 20, 20],      # '= text'
+            [20, 28, 1, 20, 20],       # 'x = 1'
+            [1, 10, 28, 20, 20],       # '1 + ='
+            [1, 10, 2, 28, 28],        # '1 + 2 =='
+        ])
+        detection = extractor.find_valid_equations(ids, eq_token_id=28)
+
+        assert detection.has_valid_equation.tolist() == [False, False, False, False]
+        assert detection.valid_eq_count.tolist() == [0, 0, 0, 0]
+
+    def test_ties_extraction_to_the_matching_operator(self):
+        extractor = _build_per_digit_extractor()
+        # Earlier '+' must not be selected for the later 7*9= expression.
+        ids = torch.tensor([[1, 10, 2, 30, 7, 14, 9, 28]])
+        detection = extractor.find_valid_equations(ids, eq_token_id=28)
+
+        assert detection.has_valid_equation.tolist() == [True]
+        assert detection.op_pos.tolist() == [5]
+
+    def test_allows_whitespace_only_between_equation_components(self):
+        extractor = _build_per_digit_extractor()
+        # 3 <space> + <space> 5 <space> =
+        ids = torch.tensor([[3, 29, 10, 29, 5, 29, 28]])
+        detection = extractor.find_valid_equations(ids, eq_token_id=28)
+
+        assert detection.has_valid_equation.tolist() == [True]
+        assert detection.eq_pos.tolist() == [6]
+        assert detection.op_pos.tolist() == [2]
+
+    def test_single_token_numbers_are_supported(self):
+        extractor = OperandExtractor(hidden_dim=8, num_digits=4)
+        extractor._per_digit = False
+        extractor.is_number_token = torch.tensor([False, True, True, False, True])
+        extractor.is_operator = torch.tensor([False, False, False, True, False])
+        # token IDs: 1=12, 3='+', 2=34, 4='='
+        detection = extractor.find_valid_equations(
+            torch.tensor([[1, 3, 2, 4]]), eq_token_id=4,
+        )
+
+        assert detection.has_valid_equation.tolist() == [True]
+        assert detection.eq_pos.tolist() == [3]
+        assert detection.op_pos.tolist() == [1]
+
+    def test_lora_gate_uses_the_same_answer_zone_as_injection(self):
+        extractor = _build_per_digit_extractor()
+        dummy = SimpleNamespace(
+            lora_head=object(),
+            _generation_mode=False,
+            _cached_lora_gate=None,
+            compute_core=SimpleNamespace(extract=extractor),
+        )
+        ids = torch.tensor([
+            [3, 10, 5, 28, 8, 20],  # valid equation followed by answer then text
+            [20, 28, 1, 20, 20, 20], # isolated '='
+        ])
+        detection = extractor.find_valid_equations(ids, eq_token_id=28)
+        gate = GPT2WithARB._compute_lora_gate(
+            dummy,
+            ids,
+            detection.has_valid_equation,
+            detection.eq_pos,
+            detection.has_valid_equation & (detection.eq_pos == ids.size(1) - 1),
+        )
+
+        assert gate.squeeze(-1).tolist() == [
+            [False, False, False, True, True, False],
+            [False, False, False, False, False, False],
+        ]
 
 
 class TestARBModule:
@@ -292,8 +405,8 @@ class TestOperationSelection:
         captured = {}
         original_select = arb.core._select_operation_result
 
-        def capturing_select(results, input_ids):
-            selected = original_select(results, input_ids)
+        def capturing_select(results, input_ids, op_pos=None):
+            selected = original_select(results, input_ids, op_pos=op_pos)
             captured["all_results"] = results.clone()
             captured["selected"] = selected.clone()
             return selected

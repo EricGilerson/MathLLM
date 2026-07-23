@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from datetime import date
 from pathlib import Path
@@ -20,6 +21,7 @@ import torch
 import torch.nn.functional as F
 
 from mathllm.model.gpt2_arb import GPT2WithARB
+from mathllm.evaluation.zero_forgetting import compute_perplexity
 
 
 DEFAULT_CASES = {
@@ -64,6 +66,17 @@ def main() -> None:
     parser.add_argument("--model-dir", default="trained_model_360m")
     parser.add_argument("--output", default="review/artifacts/containment_probe.json")
     parser.add_argument("--device", default="cpu")
+    parser.add_argument("--wikitext-limit", type=int, default=0,
+                        help="Add this many non-empty WikiText-103 test documents from the local cache.")
+    parser.add_argument("--swebench-limit", type=int, default=0,
+                        help="Add this many SWE-bench Lite test patches from the local cache.")
+    parser.add_argument("--max-tokens", type=int, default=128,
+                        help="Score at most this many tokens from each example.")
+    parser.add_argument("--wikitext-ppl-limit", type=int, default=0,
+                        help="Compute base/ARB perplexity over this many cached WikiText test documents.")
+    parser.add_argument("--wikitext-offset", type=int, default=0,
+                        help="Starting non-empty WikiText test-document index for corpus or PPL slices.")
+    parser.add_argument("--ppl-window", type=int, default=256)
     args = parser.parse_args()
 
     device = torch.device(args.device)
@@ -71,10 +84,29 @@ def main() -> None:
     model.eval()
     model.base_model.eval()
 
+    cases = {category: list(texts) for category, texts in DEFAULT_CASES.items()}
+    if args.wikitext_limit or args.swebench_limit or args.wikitext_ppl_limit:
+        os.environ.setdefault("HF_HUB_OFFLINE", "1")
+        from datasets import load_dataset
+        if args.wikitext_limit or args.wikitext_ppl_limit:
+            dataset = load_dataset("Salesforce/wikitext", "wikitext-103-raw-v1", split="test")
+            wikitext_texts = [
+                row["text"] for row in dataset if row["text"].strip()
+            ]
+            if args.wikitext_limit:
+                cases["wikitext_103_test"] = wikitext_texts[
+                    args.wikitext_offset:args.wikitext_offset + args.wikitext_limit
+                ]
+        if args.swebench_limit:
+            dataset = load_dataset("princeton-nlp/SWE-bench_Lite", split="test")
+            cases["swebench_lite_patches"] = [
+                row["patch"] for row in dataset if row["patch"].strip()
+            ][:args.swebench_limit]
+
     rows = []
-    for category, texts in DEFAULT_CASES.items():
+    for category, texts in cases.items():
         for text in texts:
-            input_ids = tokenizer(text, return_tensors="pt")["input_ids"].to(device)
+            input_ids = tokenizer(text, return_tensors="pt")["input_ids"][:, :args.max_tokens].to(device)
             attention_mask = torch.ones_like(input_ids)
             with torch.inference_mode():
                 arb = model(input_ids=input_ids, attention_mask=attention_mask)
@@ -102,7 +134,7 @@ def main() -> None:
         row["nll_delta"] = row["arb_nll"] - row["base_nll"]
 
     summaries = {}
-    for category in DEFAULT_CASES:
+    for category in cases:
         category_rows = [row for row in rows if row["category"] == category]
         summaries[category] = {
             "examples": len(category_rows),
@@ -113,11 +145,36 @@ def main() -> None:
             "mean_arb_nll": sum(row["arb_nll"] for row in category_rows) / len(category_rows),
             "mean_nll_delta": sum(row["nll_delta"] for row in category_rows) / len(category_rows),
         }
-    report = {"date": str(date.today()), "model_dir": args.model_dir, "device": str(device), "probe": "curated", "summary": summaries, "examples": rows}
+    perplexity = None
+    if args.wikitext_ppl_limit:
+        ppl_texts = wikitext_texts[
+            args.wikitext_offset:args.wikitext_offset + args.wikitext_ppl_limit
+        ]
+        base_ppl = compute_perplexity(
+            model.base_model, tokenizer, ppl_texts, device=device,
+            max_length=args.ppl_window, stride=args.ppl_window,
+        )
+        arb_ppl = compute_perplexity(
+            model, tokenizer, ppl_texts, device=device,
+            max_length=args.ppl_window, stride=args.ppl_window,
+        )
+        perplexity = {
+            "corpus": "WikiText-103 test", "documents": len(ppl_texts),
+            "document_offset": args.wikitext_offset,
+            "max_length": args.ppl_window, "stride": args.ppl_window,
+            "base": base_ppl, "arb": arb_ppl,
+            "perplexity_delta": arb_ppl["perplexity"] - base_ppl["perplexity"],
+            "avg_nll_delta": arb_ppl["avg_nll"] - base_ppl["avg_nll"],
+        }
+    report = {
+        "date": str(date.today()), "model_dir": args.model_dir, "device": str(device),
+        "probe": "curated plus optional offline corpora", "max_tokens": args.max_tokens,
+        "summary": summaries, "perplexity": perplexity, "examples": rows,
+    }
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(report, indent=2) + "\n")
-    print(json.dumps({"output": str(output), "summary": summaries}, indent=2))
+    print(json.dumps({"output": str(output), "summary": summaries, "perplexity": perplexity}, indent=2))
 
 
 if __name__ == "__main__":

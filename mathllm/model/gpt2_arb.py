@@ -104,6 +104,7 @@ class TransformerWithARB(nn.Module):
         config: Config,
         base_model: PreTrainedModel | None = None,
         eq_token_id: int | None = None,
+        freeze_base: bool = True,
     ):
         super().__init__()
         self.config = config
@@ -134,8 +135,11 @@ class TransformerWithARB(nn.Module):
             # Temporary default; overwritten by build_token_digit_tables()
             self._eq_token_id = 28
 
-        # Freeze ALL base model parameters
-        freeze_parameters(self.base_model)
+        # Fine-tuning uses a frozen foundation model by default. The separate
+        # toy-pretraining track supplies a randomly initialized decoder with
+        # ``freeze_base=False`` so it can test co-adaptation end to end.
+        if freeze_base:
+            freeze_parameters(self.base_model)
 
         # Architecture-specific setup
         if self.arch == ModelArch.GPT2:

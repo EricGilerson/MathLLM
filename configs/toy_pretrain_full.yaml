@@ -1,0 +1,28 @@
+# CUDA-scale Priority 3 protocol. Run baseline and ARB separately for at least
+# three seeds; this file deliberately does not reuse any fine-tuned checkpoint.
+model:
+  n_layer: 6
+  n_embd: 416
+  n_head: 8
+  n_inner: 1664
+
+data:
+  mixture_file: "pretraining_data/toy_full_75_25.pt"
+  prose_documents: 20000
+  train_blocks: 200000
+  eval_blocks: 5000
+  arithmetic_token_fraction: 0.25
+  max_digits: 3
+  invocation_fraction: 0.25
+
+training:
+  output_dir: "pretraining_runs/toy_full_75_25_seed20260723"
+  device: "cuda"
+  seed: 20260723
+  context_length: 128
+  batch_size: 32
+  learning_rate: 0.0003
+  weight_decay: 0.01
+  max_steps: 20000
+  eval_batches: 32
+  eval_cases: 100

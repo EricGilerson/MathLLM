@@ -22,3 +22,13 @@ CLAUDE.md
 tmp.md
 paper.*
 prior_analysis.json
+
+# Local experiment outputs and working rebuttal material (kept outside commits).
+/pretraining_data/
+/pretraining_runs/
+/review/
+
+# Local NeurIPS template and manuscript files.
+/Formatting_Instructions_For_NeurIPS_2026/
+/checklist.tex
+/neurips_2026.*

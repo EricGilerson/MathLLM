@@ -366,6 +366,24 @@ class TransformerWithARB(nn.Module):
             dict with 'loss' (if labels provided), 'logits', and optionally
             'past_key_values'
         """
+        # The overwhelmingly common language-model path contains no direct
+        # arithmetic expression. In that case route straight through the
+        # native base-model forward rather than paying for RNS computation,
+        # injector MLPs, or a gated LoRA projection. A generation cache that
+        # was armed by a prior valid ``A op B =`` prompt must stay on the ARB
+        # path even though its later one-token cache inputs contain no '='.
+        detection = self.compute_core.extract.find_valid_equations(input_ids, self._eq_token_id)
+        has_syntax = bool(detection.has_valid_equation.any().item())
+        cached_arithmetic_active = (
+            self.compute_core._generation_mode
+            and self.compute_core._cached_has_eq is not None
+            and bool(self.compute_core._cached_has_eq.any().item())
+        )
+        if not has_syntax and not cached_arithmetic_active:
+            return self._forward_inactive_base(
+                input_ids, attention_mask, labels, past_key_values, use_cache, detection,
+            )
+
         if self.arch == ModelArch.GPT2:
             return self._forward_gpt2(
                 input_ids, attention_mask, labels, past_key_values, use_cache
@@ -374,6 +392,47 @@ class TransformerWithARB(nn.Module):
             return self._forward_llama(
                 input_ids, attention_mask, labels, past_key_values, use_cache
             )
+
+    def _forward_inactive_base(
+        self,
+        input_ids: Tensor,
+        attention_mask: Tensor | None,
+        labels: Tensor | None,
+        past_key_values: DynamicCache | None,
+        use_cache: bool,
+        detection,
+    ) -> dict[str, Tensor | None]:
+        """Delegate a no-trigger batch to the untouched base model.
+
+        The native model owns its KV cache on this route, so consecutive
+        no-trigger generation steps remain cache-compatible. ``detection`` is
+        retained only for the public instrumentation fields.
+        """
+        outputs = self.base_model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            labels=labels,
+            past_key_values=past_key_values,
+            use_cache=use_cache,
+            return_dict=True,
+        )
+        no_domain = torch.zeros_like(detection.has_valid_equation, dtype=torch.bool)
+        result: dict[str, object] = {
+            "loss": outputs.loss,
+            "logits": outputs.logits,
+            "arb_extractions": {},
+            "arb_detection": {
+                "has_valid_equation": no_domain,
+                "syntax_valid": detection.has_valid_equation,
+                "domain_valid": no_domain,
+                "eq_pos": detection.eq_pos,
+                "candidate_eq_count": detection.candidate_eq_count,
+                "valid_eq_count": detection.valid_eq_count,
+            },
+        }
+        if use_cache:
+            result["past_key_values"] = outputs.past_key_values
+        return result
 
     def _forward_gpt2(
         self,

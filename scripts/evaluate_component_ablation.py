@@ -18,9 +18,9 @@ from mathllm.evaluation.evaluator import ARBEvaluator
 from mathllm.model.gpt2_arb import GPT2WithARB
 
 
-def _set_multipliers(model: GPT2WithARB, injection: float, lora: float) -> None:
-    for injector in model.injectors.values():
-        injector.inject.set_eval_gate_multiplier(injection)
+def _set_multipliers(model: GPT2WithARB, active_layers: set[str], lora: float) -> None:
+    for layer, injector in model.injectors.items():
+        injector.inject.set_eval_gate_multiplier(1.0 if layer in active_layers else 0.0)
     if model.lora_head is not None:
         model.lora_head.set_eval_multiplier(lora)
     if model.lora_layers is not None:
@@ -36,7 +36,9 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=20260723)
     parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--device", default="cpu")
-    parser.add_argument("--setting", choices=["full", "injection_off", "lora_off", "both_off"],
+    parser.add_argument("--setting", choices=[
+        "full", "final_only", "layer_20_only", "injection_off", "lora_off", "both_off",
+    ],
                         help="Run one setting only, for execution-window sharding.")
     args = parser.parse_args()
     if args.samples_per_cell < 1:
@@ -50,19 +52,24 @@ def main() -> None:
     cells += evaluator._build_division_cells(args.samples_per_cell, args.seed + 1)
     cases = [case for cell in cells for case in cell["cases"]]
 
+    layers = sorted(model.injectors.keys(), key=int)
+    if len(layers) < 2:
+        raise ValueError("Layer-position ablation requires at least two ARB injectors")
     settings = {
-        "full": (1.0, 1.0),
-        "injection_off": (0.0, 1.0),
-        "lora_off": (1.0, 0.0),
-        "both_off": (0.0, 0.0),
+        "full": (set(layers), 1.0),
+        "final_only": ({layers[-1]}, 1.0),
+        "layer_20_only": ({"20"}, 1.0),
+        "injection_off": (set(), 1.0),
+        "lora_off": (set(layers), 0.0),
+        "both_off": (set(), 0.0),
     }
     results = {}
     selected_settings = {args.setting: settings[args.setting]} if args.setting else settings
-    for name, (injection, lora) in selected_settings.items():
-        _set_multipliers(model, injection, lora)
+    for name, (active_layers, lora) in selected_settings.items():
+        _set_multipliers(model, active_layers, lora)
         score = evaluator._evaluate_integer_cases(cases, include_examples=True)
         results[name] = {
-            "injection_multiplier": injection,
+            "active_injection_layers": sorted(active_layers, key=int),
             "lora_multiplier": lora,
             **score,
         }

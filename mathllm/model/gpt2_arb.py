@@ -489,6 +489,8 @@ class TransformerWithARB(nn.Module):
             "arb_extractions": arb_extractions,
             "arb_detection": {
                 "has_valid_equation": cr.has_eq,
+                "syntax_valid": cr.syntax_valid,
+                "domain_valid": cr.domain_valid,
                 "eq_pos": cr.eq_pos,
                 "candidate_eq_count": cr.candidate_eq_count,
                 "valid_eq_count": cr.valid_eq_count,
@@ -623,6 +625,8 @@ class TransformerWithARB(nn.Module):
             "arb_extractions": arb_extractions,
             "arb_detection": {
                 "has_valid_equation": cr.has_eq,
+                "syntax_valid": cr.syntax_valid,
+                "domain_valid": cr.domain_valid,
                 "eq_pos": cr.eq_pos,
                 "candidate_eq_count": cr.candidate_eq_count,
                 "valid_eq_count": cr.valid_eq_count,

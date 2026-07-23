@@ -44,7 +44,9 @@ class ComputeResult:
     results: Tensor   # [B, S, K+1] MSB-first answer digits + sign
     d_a: Tensor       # [B, S, K]   operand A digit vector
     d_b: Tensor       # [B, S, K]   operand B digit vector
-    has_eq: Tensor    # [B]         whether each sequence has a valid equation
+    has_eq: Tensor    # [B]         whether ARB may safely serve the equation
+    syntax_valid: Tensor  # [B]     whether each sequence has direct A op B = syntax
+    domain_valid: Tensor  # [B]     whether its arithmetic is supported exactly
     eq_pos: Tensor    # [B]         selected valid '=' position (or S if absent)
     candidate_eq_count: Tensor  # [B] total '=' tokens, for instrumentation
     valid_eq_count: Tensor      # [B] valid direct-equation tokens
@@ -257,6 +259,52 @@ class ARBComputeCore(nn.Module):
 
         return torch.cat([msb_digits, sign], dim=-1)
 
+    def _supported_domain_mask(
+        self,
+        d_a: Tensor,
+        d_b: Tensor,
+        input_ids: Tensor,
+        op_pos: Tensor,
+    ) -> Tensor:
+        """Return which parsed operations are exact in the configured RNS range.
+
+        The frozen arithmetic core represents residues modulo ``P``.  It must
+        not be injected for inputs whose ordinary-integer answer is ambiguous
+        under that representation.  This is deliberately a *bypass*, not a
+        learned refusal: unsupported prompts fall back to the base model.
+        """
+        B = input_ids.size(0)
+        # Synthetic unit-test extractors may not have tokenizer-derived
+        # operation tables.  Keep their syntax-only behavior rather than
+        # interpreting arbitrary IDs as operations.
+        if self.extract.op_token_to_result_idx.size(0) <= 1:
+            return torch.ones(B, device=input_ids.device, dtype=torch.bool)
+
+        # Operand vectors are LSB-first and broadcast across positions.
+        powers = torch.pow(
+            torch.tensor(10, device=d_a.device, dtype=torch.long),
+            torch.arange(self.num_digits, device=d_a.device, dtype=torch.long),
+        )
+        a = (d_a[:, 0, :].long() * powers).sum(dim=-1)
+        b = (d_b[:, 0, :].long() * powers).sum(dim=-1)
+
+        op_tokens = input_ids.gather(1, op_pos.clamp(0, input_ids.size(1) - 1).unsqueeze(1)).squeeze(1)
+        op_ids = op_tokens.clamp(0, self.extract.op_token_to_result_idx.size(0) - 1)
+        op = self.extract.op_token_to_result_idx[op_ids]
+        P = self.compute.P
+        operands_in_range = (a < P) & (b < P)
+
+        supported = torch.zeros(B, device=input_ids.device, dtype=torch.bool)
+        supported |= operands_in_range & (op == 0) & (a + b < P)  # addition
+        supported |= operands_in_range & (op == 1) & (a >= b)     # non-negative subtraction
+        supported |= operands_in_range & (op == 2) & (a <= (P - 1) // b.clamp_min(1))
+        # Exponentiation is not part of the reported four-operation interface;
+        # do not silently treat its modular result as an ordinary integer.
+        nonzero_b = b != 0
+        exact_division = a.remainder(torch.where(nonzero_b, b, torch.ones_like(b))) == 0
+        supported |= operands_in_range & (op == 4) & nonzero_b & exact_division
+        return supported
+
     # ------------------------------------------------------------------
     # Forward
     # ------------------------------------------------------------------
@@ -282,9 +330,9 @@ class ARBComputeCore(nn.Module):
         # and the LM-head adapter. This prevents '=' alone from activating the
         # learned arithmetic pathway.
         detection = self.extract.find_valid_equations(input_ids, self.eq_token_id)
-        has_eq = detection.has_valid_equation
+        syntax_valid = detection.has_valid_equation
         eq_pos = detection.eq_pos
-        generation_ready = has_eq & (eq_pos == S - 1)
+        generation_ready = syntax_valid & (eq_pos == S - 1)
 
         # Generation cache: return cached results on step 2+
         if self._generation_mode and self._cached_results is not None:
@@ -295,7 +343,9 @@ class ARBComputeCore(nn.Module):
                 results=self._cached_results.unsqueeze(1),
                 d_a=d_a,
                 d_b=d_b,
-                has_eq=self._cached_has_eq if self._cached_has_eq is not None else has_eq,
+                has_eq=self._cached_has_eq if self._cached_has_eq is not None else syntax_valid,
+                syntax_valid=syntax_valid,
+                domain_valid=self._cached_has_eq if self._cached_has_eq is not None else syntax_valid,
                 eq_pos=eq_pos,
                 candidate_eq_count=detection.candidate_eq_count,
                 valid_eq_count=detection.valid_eq_count,
@@ -306,6 +356,11 @@ class ARBComputeCore(nn.Module):
         d_a, d_b, _, _ = self.extract(
             None, input_ids, attention_mask, op_pos=detection.op_pos,
         )
+        domain_valid = self._supported_domain_mask(
+            d_a, d_b, input_ids, detection.op_pos,
+        )
+        has_eq = syntax_valid & domain_valid
+        generation_ready = has_eq & (eq_pos == S - 1)
 
         # Stage 2: Encode to RNS circles
         a_circle = self.encode(d_a)
@@ -335,6 +390,8 @@ class ARBComputeCore(nn.Module):
             d_a=d_a,
             d_b=d_b,
             has_eq=has_eq,
+            syntax_valid=syntax_valid,
+            domain_valid=domain_valid,
             eq_pos=eq_pos,
             candidate_eq_count=detection.candidate_eq_count,
             valid_eq_count=detection.valid_eq_count,

@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import torch
 
-from mathllm.arb.arb_module import ArithmeticResidualBlock, DigitSelector
+from mathllm.arb.arb_module import ARBComputeCore, ArithmeticResidualBlock, DigitSelector
 from mathllm.arb.constants import DEFAULT_PRIMES
 from mathllm.arb.stage1_extract import OperandExtractor
 from mathllm.arb.stage4_inject import ResultInjector
@@ -157,6 +157,34 @@ class TestValidEquationDetection:
             [False, False, False, True, True, False],
             [False, False, False, False, False, False],
         ]
+
+
+class TestSupportedArithmeticDomain:
+    def test_rejects_ambiguous_arithmetic_without_disabling_exact_cases(self):
+        core = ARBComputeCore(hidden_dim=8, primes=(7, 11, 13), num_digits=6)
+        op_table = torch.full((32,), -1, dtype=torch.long)
+        for char, index in {'+': 0, '-': 1, '*': 2, '^': 3, '/': 4}.items():
+            op_table[_OP_TOKENS[char]] = index
+        core.extract.op_token_to_result_idx = op_table
+
+        # LSB-first operand vectors: 84/7 is exact; the rest must bypass ARB.
+        pairs = [(84, 7), (7, 0), (7, 2), (3, 5), (900, 900)]
+        ops = [_OP_TOKENS['/'], _OP_TOKENS['/'], _OP_TOKENS['/'], _OP_TOKENS['-'], _OP_TOKENS['*']]
+        d_a = torch.zeros(len(pairs), 1, 6)
+        d_b = torch.zeros_like(d_a)
+        for row, (a, b) in enumerate(pairs):
+            for slot in range(6):
+                d_a[row, 0, slot] = a % 10
+                d_b[row, 0, slot] = b % 10
+                a //= 10
+                b //= 10
+        ids = torch.tensor([[0, op, 0] for op in ops])
+        mask = core._supported_domain_mask(
+            d_a, d_b, ids, torch.ones(len(pairs), dtype=torch.long),
+        )
+
+        # P=1001: 900*900 is outside the exact CRT range.
+        assert mask.tolist() == [True, False, False, False, False]
 
 
 class TestARBModule:

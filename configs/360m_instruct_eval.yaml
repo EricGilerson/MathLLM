@@ -1,0 +1,12 @@
+# Evaluation-only configuration for the instruction-tuned comparison.
+# It deliberately uses the same seeded arithmetic cells and decoding cap as
+# configs/360m.yaml; only the raw checkpoint and prompt protocol differ.
+training:
+  base_model: "HuggingFaceTB/SmolLM2-360M-Instruct"
+  device: "auto"
+
+evaluation:
+  num_samples_per_config: 1000
+  max_digits_range: [1, 3]
+  max_new_tokens: 15
+  batch_size: 64

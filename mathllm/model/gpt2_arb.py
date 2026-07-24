@@ -373,21 +373,13 @@ class TransformerWithARB(nn.Module):
         # was armed by a prior valid ``A op B =`` prompt must stay on the ARB
         # path even though its later one-token cache inputs contain no '='.
         detection = self.compute_core.extract.find_valid_equations(input_ids, self._eq_token_id)
-        # At inference, ARB is an explicit *continuation* interface: the
-        # selected equation must end at the current input boundary so the next
-        # token is the answer.  A completed equation earlier in a prompt is
-        # data to be modeled, not an instruction to overwrite its continuation.
-        # Training with labels deliberately retains the full answer sequence so
-        # the learned interface can receive loss on answer tokens.
-        ready_now = detection.has_valid_equation & (detection.eq_pos == input_ids.size(1) - 1)
-        activation_now = detection.has_valid_equation if labels is not None else ready_now
-        has_active_prompt = bool(activation_now.any().item())
+        has_syntax = bool(detection.has_valid_equation.any().item())
         cached_arithmetic_active = (
             self.compute_core._generation_mode
             and self.compute_core._cached_has_eq is not None
             and bool(self.compute_core._cached_has_eq.any().item())
         )
-        if not has_active_prompt and not cached_arithmetic_active:
+        if not has_syntax and not cached_arithmetic_active:
             return self._forward_inactive_base(
                 input_ids, attention_mask, labels, past_key_values, use_cache, detection,
             )

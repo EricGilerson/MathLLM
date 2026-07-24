@@ -26,6 +26,9 @@ _SUMMARY_KEYS = (
     "direct_arithmetic_accuracy",
     "contextual_seen_arithmetic_accuracy",
     "contextual_unseen_arithmetic_accuracy",
+    "heldout_fact_nll",
+    "heldout_fact_accuracy",
+    "fact_eval_cases",
 )
 
 

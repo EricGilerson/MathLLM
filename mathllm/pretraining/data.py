@@ -11,6 +11,7 @@ from pathlib import Path
 import torch
 
 from mathllm.pretraining.arithmetic_bpe_tokenizer import ArithmeticBPETokenizer
+from mathllm.pretraining.fact_benchmark import fact_eval_cases, fact_eval_texts, fact_training_texts, make_facts
 
 
 # Varied instruction forms, with an explicit calculation boundary in every
@@ -54,6 +55,8 @@ class MixtureSpec:
     # experiment rather than relying on example-level template sampling.
     direct_equation_token_fraction: float | None = None
     contextual_equation_token_fraction: float | None = None
+    fact_token_fraction: float = 0.0
+    fact_count: int = 0
 
 
 def load_prose_documents(
@@ -166,19 +169,24 @@ def build_mixture(spec: MixtureSpec, prose_documents: list[str], tokenizer: Arit
             raise ValueError("Set both direct_equation_token_fraction and contextual_equation_token_fraction")
         direct_fraction = spec.direct_equation_token_fraction
         contextual_fraction = spec.contextual_equation_token_fraction
-        prose_fraction = 1.0 - direct_fraction - contextual_fraction
-        if min(prose_fraction, direct_fraction, contextual_fraction) <= 0.0:
-            raise ValueError("Three-way mixture fractions must be positive and sum to less than one")
+        fact_fraction = spec.fact_token_fraction
+        prose_fraction = 1.0 - direct_fraction - contextual_fraction - fact_fraction
+        if min(prose_fraction, direct_fraction, contextual_fraction) <= 0.0 or fact_fraction < 0.0:
+            raise ValueError("Mixture fractions must be non-negative and leave positive prose/direct/context fractions")
+        if fact_fraction and spec.fact_count <= 0:
+            raise ValueError("fact_count must be positive when fact_token_fraction is nonzero")
     elif not 0.0 < spec.arithmetic_token_fraction < 1.0:
         raise ValueError("arithmetic_token_fraction must be between 0 and 1")
     rng = random.Random(spec.seed)
     if exact_three_way:
         train_direct_blocks = round(spec.train_blocks * direct_fraction)
         train_contextual_blocks = round(spec.train_blocks * contextual_fraction)
+        train_fact_blocks = round(spec.train_blocks * fact_fraction)
         eval_direct_blocks = round(spec.eval_blocks * direct_fraction)
         eval_contextual_blocks = round(spec.eval_blocks * contextual_fraction)
-        train_prose_blocks = spec.train_blocks - train_direct_blocks - train_contextual_blocks
-        eval_prose_blocks = spec.eval_blocks - eval_direct_blocks - eval_contextual_blocks
+        eval_fact_blocks = round(spec.eval_blocks * fact_fraction)
+        train_prose_blocks = spec.train_blocks - train_direct_blocks - train_contextual_blocks - train_fact_blocks
+        eval_prose_blocks = spec.eval_blocks - eval_direct_blocks - eval_contextual_blocks - eval_fact_blocks
     else:
         train_arithmetic_blocks = round(spec.train_blocks * spec.arithmetic_token_fraction)
         eval_arithmetic_blocks = round(spec.eval_blocks * spec.arithmetic_token_fraction)
@@ -219,6 +227,9 @@ def build_mixture(spec: MixtureSpec, prose_documents: list[str], tokenizer: Arit
     eval_arithmetic = arithmetic_texts(needed_texts, spec.seed + 2, spec.max_digits, spec.invocation_fraction)
     train_contextual = contextual_arithmetic_texts(needed_texts, spec.seed + 3, spec.max_digits)
     eval_contextual = contextual_arithmetic_texts(needed_texts, spec.seed + 4, spec.max_digits)
+    facts = make_facts(spec.fact_count, spec.seed + 5) if spec.fact_token_fraction else []
+    train_facts = fact_training_texts(needed_texts, spec.seed + 6, facts) if facts else []
+    eval_facts = fact_eval_texts(needed_texts, spec.seed + 7, facts) if facts else []
     block_length = spec.context_length
     train_prose_pool = _blocks_from_texts(train_prose, tokenizer, block_length)
     eval_prose_pool = _blocks_from_texts(eval_prose, tokenizer, block_length)
@@ -226,6 +237,8 @@ def build_mixture(spec: MixtureSpec, prose_documents: list[str], tokenizer: Arit
     eval_arithmetic_pool = _blocks_from_texts(eval_arithmetic, tokenizer, block_length)
     train_contextual_pool = _blocks_from_texts(train_contextual, tokenizer, block_length)
     eval_contextual_pool = _blocks_from_texts(eval_contextual, tokenizer, block_length)
+    train_fact_pool = _blocks_from_texts(train_facts, tokenizer, block_length) if facts else []
+    eval_fact_pool = _blocks_from_texts(eval_facts, tokenizer, block_length) if facts else []
 
     def take(pool, count, source_name):
         if not pool:
@@ -245,6 +258,9 @@ def build_mixture(spec: MixtureSpec, prose_documents: list[str], tokenizer: Arit
         train_records += [(block, 2) for block in take(train_contextual_pool, train_contextual_blocks, "train contextual arithmetic")]
         eval_records += [(block, 1) for block in take(eval_arithmetic_pool, eval_direct_blocks, "held-out direct arithmetic")]
         eval_records += [(block, 2) for block in take(eval_contextual_pool, eval_contextual_blocks, "held-out contextual arithmetic")]
+        if facts:
+            train_records += [(block, 3) for block in take(train_fact_pool, train_fact_blocks, "train facts")]
+            eval_records += [(block, 3) for block in take(eval_fact_pool, eval_fact_blocks, "held-out facts")]
     else:
         train_records += [(block, 1) for block in take(train_arithmetic_pool, train_arithmetic_blocks, "train arithmetic")]
         eval_records += [(block, 1) for block in take(eval_arithmetic_pool, eval_arithmetic_blocks, "held-out arithmetic")]
@@ -275,6 +291,10 @@ def build_mixture(spec: MixtureSpec, prose_documents: list[str], tokenizer: Arit
             "train_contextual_equation_blocks": train_contextual_blocks,
             "eval_direct_equation_blocks": eval_direct_blocks,
             "eval_contextual_equation_blocks": eval_contextual_blocks,
+            "fact_token_fraction_target": spec.fact_token_fraction,
+            "fact_count": spec.fact_count,
+            "train_fact_blocks": train_fact_blocks,
+            "eval_fact_blocks": eval_fact_blocks,
         })
     else:
         metadata.update({
@@ -290,6 +310,7 @@ def build_mixture(spec: MixtureSpec, prose_documents: list[str], tokenizer: Arit
         "eval_input_ids": torch.tensor([record[0] for record in eval_records], dtype=torch.long),
         "eval_sources": torch.tensor([record[1] for record in eval_records], dtype=torch.long),
         "metadata": metadata,
+        "fact_eval_cases": fact_eval_cases(min(256, len(facts)), spec.seed + 8, facts) if facts else [],
     }
 
 

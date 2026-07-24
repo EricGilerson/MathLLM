@@ -1,0 +1,29 @@
+# Local wiring check only; do not report these results.
+model:
+  n_layer: 2
+  n_embd: 96
+  n_head: 4
+  n_inner: 384
+  baseline_n_inner: 395
+data:
+  mixture_file: "pretraining_data/toy_fact_competition_smoke.pt"
+  tokenizer_file: "pretraining_data/toy_fact_competition_smoke_tokenizer.json"
+  tokenizer_vocab_size: 512
+  prose_documents: 128
+  train_blocks: 128
+  eval_blocks: 32
+  arithmetic_token_fraction: 0.30
+  direct_equation_token_fraction: 0.25
+  contextual_equation_token_fraction: 0.05
+  fact_token_fraction: 0.20
+  fact_count: 128
+  max_digits: 2
+training:
+  output_dir: "pretraining_runs/toy_fact_competition_smoke"
+  device: "auto"
+  seed: 20260730
+  context_length: 64
+  batch_size: 4
+  max_steps: 3
+  eval_batches: 2
+  eval_cases: 4

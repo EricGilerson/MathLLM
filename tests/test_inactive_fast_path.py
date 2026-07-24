@@ -88,6 +88,26 @@ def test_completed_equation_uses_native_base_forward(monkeypatch):
     assert wrapped["arb_extractions"] == {}
 
 
+def test_no_trigger_generation_delegates_once_to_native_base_generate(monkeypatch):
+    model, base, tokenizer = _tiny_model()
+    prompt = tokenizer.encode("ordinary prose", return_tensors="pt")
+    expected = torch.cat([prompt, torch.tensor([[tokenizer.eos_token_id]])], dim=1)
+    calls = []
+
+    def native_generate(**kwargs):
+        calls.append(kwargs)
+        return expected
+
+    monkeypatch.setattr(base, "generate", native_generate)
+    with torch.inference_mode():
+        output = model.generate(prompt, max_new_tokens=1, greedy=True)
+
+    torch.testing.assert_close(output, expected)
+    assert len(calls) == 1
+    assert calls[0]["do_sample"] is False
+    assert calls[0]["use_cache"] is True
+
+
 def test_valid_equation_keeps_custom_path_during_cached_generation():
     model, _, tokenizer = _tiny_model()
     prompt = tokenizer.encode("2+3=", return_tensors="pt")

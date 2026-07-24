@@ -53,6 +53,8 @@ class ToyDataConfig:
     invocation_fraction: float = 0.25
     direct_equation_token_fraction: float | None = None
     contextual_equation_token_fraction: float | None = None
+    fact_token_fraction: float = 0.0
+    fact_count: int = 0
     require_wikitext: bool = False
     require_external_prose: bool = False
     require_unique_source_blocks: bool = False
@@ -122,6 +124,12 @@ def prepare_data(config: ToyExperimentConfig) -> dict[str, object]:
         config.training.seed + 1,
         config.data.max_digits,
     )
+    if config.data.fact_token_fraction:
+        from mathllm.pretraining.fact_benchmark import fact_training_texts, make_facts
+        tokenizer_training_texts += fact_training_texts(
+            tokenizer_text_count, config.training.seed + 6,
+            make_facts(config.data.fact_count, config.training.seed + 5),
+        )
     tokenizer = ArithmeticBPETokenizer.train(tokenizer_training_texts, config.data.tokenizer_vocab_size)
     tokenizer.save(config.data.tokenizer_file)
     spec = MixtureSpec(
@@ -134,6 +142,8 @@ def prepare_data(config: ToyExperimentConfig) -> dict[str, object]:
         seed=config.training.seed,
         direct_equation_token_fraction=config.data.direct_equation_token_fraction,
         contextual_equation_token_fraction=config.data.contextual_equation_token_fraction,
+        fact_token_fraction=config.data.fact_token_fraction,
+        fact_count=config.data.fact_count,
         prose_source=config.data.prose_source,
         prose_source_config=config.data.prose_source_config,
         require_wikitext=config.data.require_wikitext,
@@ -280,6 +290,16 @@ def _arithmetic_metrics(model: nn.Module, tokenizer: ArithmeticBPETokenizer, con
     }
 
 
+def _fact_metrics(model, tokenizer, cases, device) -> dict[str, float]:
+    if not cases:
+        return {"heldout_fact_accuracy": float("nan"), "fact_eval_cases": 0}
+    correct = 0
+    for prompt, expected in cases:
+        full = _generate(model, tokenizer, prompt, len(expected) + 2, device)
+        correct += int(full[len(prompt):].strip().startswith(expected))
+    return {"heldout_fact_accuracy": correct / len(cases), "fact_eval_cases": len(cases)}
+
+
 def resolve_device(requested: str) -> torch.device:
     """Choose CUDA, then Apple MPS, then CPU for an ``auto`` request."""
     if requested == "auto":
@@ -348,6 +368,7 @@ def run_training(config: ToyExperimentConfig, variant: str, prepare: bool = Fals
     prose_nll = _evaluate_loss(model, eval_ids, eval_sources, 0, device, config.training.eval_batches, config.training.batch_size)
     direct_arithmetic_nll = _evaluate_loss(model, eval_ids, eval_sources, 1, device, config.training.eval_batches, config.training.batch_size)
     contextual_arithmetic_nll = _evaluate_loss(model, eval_ids, eval_sources, 2, device, config.training.eval_batches, config.training.batch_size)
+    fact_nll = _evaluate_loss(model, eval_ids, eval_sources, 3, device, config.training.eval_batches, config.training.batch_size)
     metrics = {
         "train_loss": losses,
         "heldout_prose_history": prose_eval_history,
@@ -359,9 +380,11 @@ def run_training(config: ToyExperimentConfig, variant: str, prepare: bool = Fals
         "heldout_arithmetic_nll": direct_arithmetic_nll,
         "heldout_direct_arithmetic_nll": direct_arithmetic_nll,
         "heldout_contextual_arithmetic_nll": contextual_arithmetic_nll,
+        "heldout_fact_nll": fact_nll,
         "parameter_count": sum(parameter.numel() for parameter in model.parameters()),
         "device": str(device),
         **_arithmetic_metrics(model, tokenizer, config, device),
+        **_fact_metrics(model, tokenizer, mixture.get("fact_eval_cases", []), device),
     }
     output_dir = Path(config.training.output_dir) / variant
     output_dir.mkdir(parents=True, exist_ok=True)

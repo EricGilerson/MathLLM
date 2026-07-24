@@ -27,6 +27,10 @@ class ToyModelConfig:
     n_embd: int = 144
     n_head: int = 4
     n_inner: int = 576
+    # Optional MLP width for the plain-LM capacity control.  This lets the
+    # baseline match ARB's interface parameters without changing its hidden
+    # state width, tokenizer, data, or training path.
+    baseline_n_inner: int | None = None
 
 
 @dataclass
@@ -106,7 +110,13 @@ def prepare_data(config: ToyExperimentConfig) -> dict[str, object]:
     return mixture
 
 
-def _gpt2_config(tokenizer: ArithmeticBPETokenizer, model: ToyModelConfig, context_length: int) -> GPT2Config:
+def _gpt2_config(
+    tokenizer: ArithmeticBPETokenizer,
+    model: ToyModelConfig,
+    context_length: int,
+    *,
+    n_inner: int | None = None,
+) -> GPT2Config:
     config = GPT2Config(
         vocab_size=tokenizer.vocab_size,
         n_positions=context_length + 1,
@@ -114,7 +124,7 @@ def _gpt2_config(tokenizer: ArithmeticBPETokenizer, model: ToyModelConfig, conte
         n_embd=model.n_embd,
         n_layer=model.n_layer,
         n_head=model.n_head,
-        n_inner=model.n_inner,
+        n_inner=model.n_inner if n_inner is None else n_inner,
         bos_token_id=tokenizer.eos_token_id,
         eos_token_id=tokenizer.eos_token_id,
         pad_token_id=tokenizer.pad_token_id,
@@ -125,7 +135,15 @@ def _gpt2_config(tokenizer: ArithmeticBPETokenizer, model: ToyModelConfig, conte
 
 def build_model(config: ToyExperimentConfig, variant: str, tokenizer: ArithmeticBPETokenizer) -> nn.Module:
     torch.manual_seed(config.training.seed)
-    base = GPT2LMHeadModel(_gpt2_config(tokenizer, config.model, config.training.context_length))
+    baseline_n_inner = config.model.baseline_n_inner or config.model.n_inner
+    base = GPT2LMHeadModel(
+        _gpt2_config(
+            tokenizer,
+            config.model,
+            config.training.context_length,
+            n_inner=baseline_n_inner if variant == "baseline" else config.model.n_inner,
+        )
+    )
     # Transformers reads this from the model instance rather than config on
     # recent versions; set both to retain the explicit causal-LM objective.
     base.loss_type = "ForCausalLM"

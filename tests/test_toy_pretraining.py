@@ -52,5 +52,17 @@ def test_toy_baseline_and_arb_are_fully_trainable():
     )
 
 
+def test_capacity_matched_baseline_uses_configured_mlp_width():
+    config = ToyExperimentConfig()
+    config.model.baseline_n_inner = config.model.n_inner + 3
+    tokenizer = _tokenizer()
+    baseline = build_model(config, "baseline", tokenizer)
+    arb = build_model(config, "arb", tokenizer)
+
+    assert sum(parameter.numel() for parameter in baseline.parameters()) > sum(
+        parameter.numel() for parameter in arb.base_model.parameters()
+    )
+
+
 def test_auto_device_is_a_supported_backend():
     assert str(resolve_device("auto")) in {"cpu", "cuda", "mps"}

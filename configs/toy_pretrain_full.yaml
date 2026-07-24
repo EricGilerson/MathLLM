@@ -1,14 +1,16 @@
 # CUDA-scale Priority 3 protocol. Run baseline and ARB separately for at least
 # three seeds; this file deliberately does not reuse any fine-tuned checkpoint.
+# The baseline's slightly wider MLP matches the ARB interface parameter count.
 model:
   n_layer: 6
-  n_embd: 416
+  n_embd: 512
   n_head: 8
-  n_inner: 1664
+  n_inner: 2048
+  baseline_n_inner: 2059
 
 data:
-  mixture_file: "pretraining_data/toy_full_75_25.pt"
-  tokenizer_file: "pretraining_data/toy_full_75_25_tokenizer.json"
+  mixture_file: "pretraining_data/toy_full_20m_75_25.pt"
+  tokenizer_file: "pretraining_data/toy_full_20m_75_25_tokenizer.json"
   tokenizer_vocab_size: 2048
   prose_documents: 20000
   train_blocks: 200000
@@ -18,13 +20,13 @@ data:
   invocation_fraction: 0.25
 
 training:
-  output_dir: "pretraining_runs/toy_full_75_25_seed20260723"
+  output_dir: "pretraining_runs/toy_full_20m_75_25_seed20260723"
   device: "auto"
   seed: 20260723
   context_length: 128
   batch_size: 32
   learning_rate: 0.0003
   weight_decay: 0.01
-  max_steps: 20000
+  max_steps: 50000
   eval_batches: 32
   eval_cases: 100

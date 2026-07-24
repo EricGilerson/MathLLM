@@ -121,6 +121,38 @@ def _measure_generation(model, input_ids, max_new_tokens, is_arb, pad_token_id, 
     return samples
 
 
+def _measure_paired_generation(base, arb, input_ids, max_new_tokens, pad_token_id, warmup, repetitions, device, progress=None):
+    """Alternate base/ARB timings and retain a per-repetition paired delta."""
+    for _ in range(warmup):
+        _generate(base, input_ids, max_new_tokens, False, pad_token_id)
+        _generate(arb, input_ids, max_new_tokens, True, pad_token_id)
+    _synchronize(device)
+    base_samples, arb_samples, deltas = [], [], []
+
+    def timed(model, is_arb):
+        _synchronize(device)
+        start = time.perf_counter()
+        output = _generate(model, input_ids, max_new_tokens, is_arb, pad_token_id)
+        _synchronize(device)
+        elapsed = time.perf_counter() - start
+        generated = int(output.size(1) - input_ids.size(1))
+        return {"latency_seconds": elapsed, "generated_tokens": generated, "tokens_per_second": generated / elapsed}
+
+    for index in range(repetitions):
+        # Reverse every other pair so a systematic first/second measurement
+        # effect cannot be attributed to one model variant.
+        if index % 2 == 0:
+            base_sample, arb_sample = timed(base, False), timed(arb, True)
+        else:
+            arb_sample, base_sample = timed(arb, True), timed(base, False)
+        base_samples.append(base_sample)
+        arb_samples.append(arb_sample)
+        deltas.append(arb_sample["latency_seconds"] - base_sample["latency_seconds"])
+        if progress is not None:
+            progress.update(2)
+    return base_samples, arb_samples, deltas
+
+
 def _measure_detection_only(detector, input_ids, eq_token_id, warmup, repetitions, device):
     """Time the token-level valid-equation detector alone (not tokenization)."""
     for _ in range(warmup):
@@ -314,17 +346,26 @@ def main() -> None:
                 arb.compute_core.extract.find_valid_equations, ids, arb._eq_token_id,
                 args.warmup, args.detector_repetitions, device,
             ), include_latency_samples=False)
-            base_summary = _summary(_measure_generation(
-                base, ids, args.max_new_tokens, False, pad_token_id, args.warmup, args.repetitions, device, progress,
-            ))
-            arb_summary = _summary(_measure_generation(
-                arb, ids, args.max_new_tokens, True, pad_token_id, args.warmup, args.repetitions, device, progress,
-            ))
+            base_samples, arb_samples, paired_deltas = _measure_paired_generation(
+                base, arb, ids, args.max_new_tokens, pad_token_id,
+                args.warmup, args.repetitions, device, progress,
+            )
+            base_summary = _summary(base_samples)
+            arb_summary = _summary(arb_samples)
             model_rows.append({
                 "prompt_tokens": length, "detector_only": detection_summary,
                 "base": base_summary, "arb": arb_summary,
                 "latency_ratio_arb_over_base": arb_summary["latency_mean_seconds"] / base_summary["latency_mean_seconds"],
                 "throughput_ratio_arb_over_base": arb_summary["tokens_per_second_mean"] / base_summary["tokens_per_second_mean"],
+                "paired_arb_minus_base": {
+                    "samples": len(paired_deltas),
+                    "mean_seconds": statistics.mean(paired_deltas),
+                    "median_seconds": statistics.median(paired_deltas),
+                    "min_seconds": min(paired_deltas),
+                    "max_seconds": max(paired_deltas),
+                    "samples_seconds": paired_deltas,
+                },
+                "measurement_order": "alternating base->arb / arb->base pairs",
             })
 
         calculator_samples, calculator_correct = _measure_cpu_calculator(prompts, args.warmup, args.repetitions)

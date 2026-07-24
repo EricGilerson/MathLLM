@@ -37,3 +37,12 @@ def test_arithmetic_prompt_suite_is_deterministic_and_calculator_valid():
     assert prompts == module.arithmetic_prompts(12, seed=9)
     assert {prompt.split()[1] for prompt, _ in prompts} == {"+", "-", "*", "/"}
     assert all(module.in_process_cpu_calculator(prompt) == expected for prompt, expected in prompts)
+
+
+def test_summary_reports_tail_latency_percentiles():
+    module = _load_script_module()
+
+    summary = module._summary([{"latency_seconds": value} for value in (1.0, 2.0, 3.0, 4.0)])
+
+    assert summary["latency_p90_seconds"] == 4.0
+    assert summary["latency_p95_seconds"] == 4.0

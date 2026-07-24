@@ -17,6 +17,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
+import platform
 import random
 import re
 import statistics
@@ -237,10 +239,19 @@ def _measure_in_process_tool_relay(
 
 def _summary(samples: list[dict], include_latency_samples: bool = True) -> dict:
     latencies = [sample["latency_seconds"] for sample in samples]
+    ordered_latencies = sorted(latencies)
+
+    def percentile(percent: float) -> float:
+        # Nearest-rank percentile keeps the definition explicit and stable for
+        # the modest sample counts used by the CUDA protocol.
+        return ordered_latencies[max(0, math.ceil(percent * len(ordered_latencies)) - 1)]
+
     summary = {
         "samples": len(samples),
         "latency_mean_seconds": statistics.mean(latencies),
         "latency_median_seconds": statistics.median(latencies),
+        "latency_p90_seconds": percentile(0.90),
+        "latency_p95_seconds": percentile(0.95),
         "latency_min_seconds": min(latencies), "latency_max_seconds": max(latencies),
         "operations_per_second_mean": statistics.mean(1.0 / latency for latency in latencies),
     }
@@ -267,14 +278,16 @@ def main() -> None:
     parser.add_argument("--tool-pre-new-tokens", type=int, default=1)
     parser.add_argument(
         "--tool-post-new-tokens", type=int, default=None,
-        help="Post-tool base-model tokens to generate (defaults to --max-new-tokens)",
+        help="Post-tool base-model tokens to generate (defaults so pre + post equals --max-new-tokens)",
     )
     parser.add_argument("--seed", type=int, default=20260723)
     args = parser.parse_args()
     if args.tool_post_new_tokens is None:
-        args.tool_post_new_tokens = args.max_new_tokens
-    if min(args.calculator_cases, args.repetitions, args.detector_repetitions, args.tool_pre_new_tokens, args.tool_post_new_tokens) <= 0:
-        parser.error("case counts, repetitions, and tool-generation token counts must be positive")
+        args.tool_post_new_tokens = args.max_new_tokens - args.tool_pre_new_tokens
+    if min(args.calculator_cases, args.repetitions, args.detector_repetitions, args.tool_pre_new_tokens) <= 0:
+        parser.error("case counts, repetitions, detector repetitions, and pre-tool tokens must be positive")
+    if args.tool_post_new_tokens <= 0:
+        parser.error("--max-new-tokens must exceed --tool-pre-new-tokens so the relay can generate a post-tool answer")
 
     device = torch.device(args.device)
     arb, tokenizer, _ = GPT2WithARB.from_exported_model(args.model_dir, device=device)
@@ -316,8 +329,24 @@ def main() -> None:
         "post_tool_generation_mean_seconds": statistics.mean(sample["post_tool_generation_seconds"] for sample in tool_relay_samples),
     })
     total_cases = args.calculator_cases * args.repetitions
+    hardware = {
+        "platform": platform.platform(),
+        "python": platform.python_version(),
+        "torch": torch.__version__,
+        "cuda_runtime": torch.version.cuda,
+    }
+    if device.type == "cuda":
+        properties = torch.cuda.get_device_properties(device)
+        hardware.update({
+            "gpu_name": torch.cuda.get_device_name(device),
+            "gpu_total_memory_bytes": properties.total_memory,
+            "gpu_compute_capability": f"{properties.major}.{properties.minor}",
+            "cudnn": torch.backends.cudnn.version(),
+        })
+
     report = {
         "date": str(date.today()), "model_dir": args.model_dir, "device": str(device),
+        "hardware": hardware,
         "base_vs_arb_boundary": "pre-tokenized, device-resident prompt IDs -> greedy generated IDs; ARB no-trigger rows include valid-equation detection and fast-path routing",
         "calculator_boundary": "CPU Python string parse -> integer arithmetic -> decimal string; no RPC, process launch, tokenizer, or model",
         "arb_calculator_comparison_boundary": "prompt string -> tokenizer + host-to-device copy + synchronized ARB greedy generation + decoded continuation",
@@ -348,8 +377,9 @@ def main() -> None:
             "final_answer_prefix_matches": sum(sample["final_answer_prefix_match"] for sample in tool_relay_samples),
             "summary": tool_relay_summary,
             "comparison_note": (
-                "Compare total latency only after accounting for generated-token budgets: "
-                "ARB uses max_new_tokens, while this relay uses pre_tool_new_tokens + post_tool_new_tokens."
+                "By default the relay's pre_tool_new_tokens + post_tool_new_tokens equals "
+                "ARB's max_new_tokens. If overridden, compare total latency only after accounting "
+                "for the recorded generated-token budgets."
             ),
             "latency_ratio_arb_over_tool_relay_with_configured_token_budgets": (
                 arb_arithmetic_summary["latency_mean_seconds"] / tool_relay_summary["latency_mean_seconds"]

@@ -27,6 +27,7 @@ from datetime import date
 from pathlib import Path
 
 import torch
+from tqdm.auto import tqdm
 
 from mathllm.model.gpt2_arb import GPT2WithARB
 
@@ -102,7 +103,7 @@ def _generate(model, input_ids: torch.Tensor, max_new_tokens: int, is_arb: bool,
         )
 
 
-def _measure_generation(model, input_ids, max_new_tokens, is_arb, pad_token_id, warmup, repetitions, device):
+def _measure_generation(model, input_ids, max_new_tokens, is_arb, pad_token_id, warmup, repetitions, device, progress=None):
     for _ in range(warmup):
         _generate(model, input_ids, max_new_tokens, is_arb, pad_token_id)
     _synchronize(device)
@@ -115,6 +116,8 @@ def _measure_generation(model, input_ids, max_new_tokens, is_arb, pad_token_id, 
         elapsed = time.perf_counter() - start
         generated = int(output.size(1) - input_ids.size(1))
         samples.append({"latency_seconds": elapsed, "generated_tokens": generated, "tokens_per_second": generated / elapsed})
+        if progress is not None:
+            progress.update(1)
     return samples
 
 
@@ -147,7 +150,7 @@ def _measure_cpu_calculator(prompts: list[tuple[str, str]], warmup: int, repetit
     return samples, correct
 
 
-def _measure_arb_prompt_to_answer(arb, tokenizer, prompts, max_new_tokens, warmup, repetitions, device):
+def _measure_arb_prompt_to_answer(arb, tokenizer, prompts, max_new_tokens, warmup, repetitions, device, progress=None):
     """Measure text prompt to decoded answer, including CPU tokenization/H2D copy."""
     for prompt, _ in prompts[:warmup]:
         ids = tokenizer.encode(prompt, return_tensors="pt").to(device)
@@ -165,6 +168,8 @@ def _measure_arb_prompt_to_answer(arb, tokenizer, prompts, max_new_tokens, warmu
             elapsed = time.perf_counter() - start
             correct += int(continuation.startswith(expected))
             samples.append({"latency_seconds": elapsed, "generated_tokens": int(output.size(1) - input_ids.size(1))})
+            if progress is not None:
+                progress.update(1)
     return samples, correct
 
 
@@ -177,6 +182,7 @@ def _measure_in_process_tool_relay(
     warmup: int,
     repetitions: int,
     device: torch.device,
+    progress=None,
 ):
     """Measure model generation -> CPU calculator -> resumed model generation.
 
@@ -234,6 +240,8 @@ def _measure_in_process_tool_relay(
     for _ in range(repetitions):
         for prompt, expected in prompts:
             samples.append(run_once(prompt, expected, record=True))
+            if progress is not None:
+                progress.update(1)
     return samples
 
 
@@ -296,31 +304,37 @@ def main() -> None:
     base.eval()
     pad_token_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id
 
-    model_rows = []
-    for length in args.prompt_lengths:
-        ids = _prompt_ids(tokenizer, length, device)
-        detection_summary = _summary(_measure_detection_only(
-            arb.compute_core.extract.find_valid_equations, ids, arb._eq_token_id,
-            args.warmup, args.detector_repetitions, device,
-        ), include_latency_samples=False)
-        base_summary = _summary(_measure_generation(base, ids, args.max_new_tokens, False, pad_token_id, args.warmup, args.repetitions, device))
-        arb_summary = _summary(_measure_generation(arb, ids, args.max_new_tokens, True, pad_token_id, args.warmup, args.repetitions, device))
-        model_rows.append({
-            "prompt_tokens": length, "detector_only": detection_summary,
-            "base": base_summary, "arb": arb_summary,
-            "latency_ratio_arb_over_base": arb_summary["latency_mean_seconds"] / base_summary["latency_mean_seconds"],
-            "throughput_ratio_arb_over_base": arb_summary["tokens_per_second_mean"] / base_summary["tokens_per_second_mean"],
-        })
-
     prompts = arithmetic_prompts(args.calculator_cases, args.seed)
-    calculator_samples, calculator_correct = _measure_cpu_calculator(prompts, args.warmup, args.repetitions)
-    arb_samples, arb_correct = _measure_arb_prompt_to_answer(
-        arb, tokenizer, prompts, args.max_new_tokens, args.warmup, args.repetitions, device,
-    )
-    tool_relay_samples = _measure_in_process_tool_relay(
-        base, tokenizer, prompts, args.tool_pre_new_tokens, args.tool_post_new_tokens,
-        args.warmup, args.repetitions, device,
-    )
+    timed_samples = 2 * len(args.prompt_lengths) * args.repetitions + 2 * args.calculator_cases * args.repetitions
+    with tqdm(total=timed_samples, desc="Benchmark timed samples", unit="sample", dynamic_ncols=True) as progress:
+        model_rows = []
+        for length in args.prompt_lengths:
+            ids = _prompt_ids(tokenizer, length, device)
+            detection_summary = _summary(_measure_detection_only(
+                arb.compute_core.extract.find_valid_equations, ids, arb._eq_token_id,
+                args.warmup, args.detector_repetitions, device,
+            ), include_latency_samples=False)
+            base_summary = _summary(_measure_generation(
+                base, ids, args.max_new_tokens, False, pad_token_id, args.warmup, args.repetitions, device, progress,
+            ))
+            arb_summary = _summary(_measure_generation(
+                arb, ids, args.max_new_tokens, True, pad_token_id, args.warmup, args.repetitions, device, progress,
+            ))
+            model_rows.append({
+                "prompt_tokens": length, "detector_only": detection_summary,
+                "base": base_summary, "arb": arb_summary,
+                "latency_ratio_arb_over_base": arb_summary["latency_mean_seconds"] / base_summary["latency_mean_seconds"],
+                "throughput_ratio_arb_over_base": arb_summary["tokens_per_second_mean"] / base_summary["tokens_per_second_mean"],
+            })
+
+        calculator_samples, calculator_correct = _measure_cpu_calculator(prompts, args.warmup, args.repetitions)
+        arb_samples, arb_correct = _measure_arb_prompt_to_answer(
+            arb, tokenizer, prompts, args.max_new_tokens, args.warmup, args.repetitions, device, progress,
+        )
+        tool_relay_samples = _measure_in_process_tool_relay(
+            base, tokenizer, prompts, args.tool_pre_new_tokens, args.tool_post_new_tokens,
+            args.warmup, args.repetitions, device, progress,
+        )
     calculator_summary, arb_arithmetic_summary = _summary(calculator_samples), _summary(arb_samples)
     tool_relay_summary = _summary(tool_relay_samples)
     tool_relay_summary.update({

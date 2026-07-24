@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import random
+from itertools import islice
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -43,6 +44,11 @@ class MixtureSpec:
     max_digits: int
     invocation_fraction: float
     seed: int
+    prose_source: str = "wikitext"
+    prose_source_config: str | None = None
+    require_wikitext: bool = False
+    require_external_prose: bool = False
+    require_unique_source_blocks: bool = False
     # When both are set, these exact block/token fractions replace the legacy
     # mixed-arithmetic source. They support a controlled prose/direct/context
     # experiment rather than relying on example-level template sampling.
@@ -50,17 +56,47 @@ class MixtureSpec:
     contextual_equation_token_fraction: float | None = None
 
 
-def load_prose_documents(limit: int, fallback_path: str = "data/retention.txt") -> list[str]:
-    """Load cached WikiText prose, falling back to the repository retention text."""
+def load_prose_documents(
+    limit: int,
+    fallback_path: str = "data/retention.txt",
+    require_wikitext: bool = False,
+    require_external_prose: bool = False,
+    source: str = "wikitext",
+    source_config: str | None = None,
+) -> list[str]:
+    """Load a bounded prose corpus, optionally refusing the smoke fallback."""
+    source_error: Exception | None = None
     try:
         from datasets import load_dataset
 
-        dataset = load_dataset("Salesforce/wikitext", "wikitext-103-raw-v1", split="train")
-        documents = [row["text"].strip() for row in dataset if row["text"].strip()]
+        if source == "wikitext":
+            dataset = load_dataset("Salesforce/wikitext", "wikitext-103-raw-v1", split="train")
+        elif source == "fineweb_edu":
+            dataset = load_dataset(
+                "HuggingFaceFW/fineweb-edu",
+                name=source_config or "sample-10BT",
+                split="train",
+                streaming=True,
+            )
+        else:
+            raise ValueError(f"Unsupported prose source: {source!r}")
+        documents = [
+            row["text"].strip()
+            for row in islice(dataset, limit)
+            if row.get("text", "").strip()
+        ]
         if documents:
             return documents[:limit]
-    except Exception:
-        pass
+    except Exception as error:
+        source_error = error
+
+    if require_wikitext or require_external_prose:
+        detail = f" ({source_error})" if source_error is not None else ""
+        raise RuntimeError(
+            f"The required prose source {source!r} could not be loaded. "
+            "Restore network/cache access and rerun; "
+            "do not silently train on data/retention.txt." + detail
+        ) from source_error
 
     path = Path(fallback_path)
     if not path.exists():
@@ -148,12 +184,26 @@ def build_mixture(spec: MixtureSpec, prose_documents: list[str], tokenizer: Arit
         eval_arithmetic_blocks = round(spec.eval_blocks * spec.arithmetic_token_fraction)
         train_prose_blocks = spec.train_blocks - train_arithmetic_blocks
         eval_prose_blocks = spec.eval_blocks - eval_arithmetic_blocks
-    needed_texts = max((spec.train_blocks + spec.eval_blocks) * 3, 256)
+    # Direct equations are short because every digit is deliberately an atomic
+    # token. Generate enough independent equations to supply their requested
+    # fixed blocks even in higher-arithmetic pressure diagnostics.
+    if exact_three_way:
+        largest_arithmetic_block_request = max(
+            train_direct_blocks, train_contextual_blocks,
+            eval_direct_blocks, eval_contextual_blocks,
+        )
+    else:
+        largest_arithmetic_block_request = max(train_arithmetic_blocks, eval_arithmetic_blocks)
+    needed_texts = max(
+        (spec.train_blocks + spec.eval_blocks) * 3,
+        largest_arithmetic_block_request * 20,
+        256,
+    )
     # Keep held-out sources genuinely disjoint rather than merely selecting
     # different blocks from one long token stream.
     if len(prose_documents) < 2:
         # The repository fallback can be a single long document. This keeps a
-        # smoke test usable; real runs use many WikiText documents and are
+        # smoke test usable; substantive runs use an external prose corpus and are
         # disjoint by document below.
         train_prose = [document + "\n" for document in prose_documents]
         eval_prose = list(train_prose)
@@ -177,19 +227,27 @@ def build_mixture(spec: MixtureSpec, prose_documents: list[str], tokenizer: Arit
     train_contextual_pool = _blocks_from_texts(train_contextual, tokenizer, block_length)
     eval_contextual_pool = _blocks_from_texts(eval_contextual, tokenizer, block_length)
 
-    def take(pool, count):
+    def take(pool, count, source_name):
+        if not pool:
+            raise ValueError(f"No blocks available for {source_name}")
+        if spec.require_unique_source_blocks and len(pool) < count:
+            raise ValueError(
+                f"{source_name} has only {len(pool):,} unique blocks for {count:,} requested. "
+                "Increase the source corpus or reduce the stored mixture; do not cycle blocks "
+                "in a substantive pretraining run."
+            )
         return [pool[index % len(pool)] for index in range(count)]
 
-    train_records = [(block, 0) for block in take(train_prose_pool, train_prose_blocks)]
-    eval_records = [(block, 0) for block in take(eval_prose_pool, eval_prose_blocks)]
+    train_records = [(block, 0) for block in take(train_prose_pool, train_prose_blocks, "train prose")]
+    eval_records = [(block, 0) for block in take(eval_prose_pool, eval_prose_blocks, "held-out prose")]
     if exact_three_way:
-        train_records += [(block, 1) for block in take(train_arithmetic_pool, train_direct_blocks)]
-        train_records += [(block, 2) for block in take(train_contextual_pool, train_contextual_blocks)]
-        eval_records += [(block, 1) for block in take(eval_arithmetic_pool, eval_direct_blocks)]
-        eval_records += [(block, 2) for block in take(eval_contextual_pool, eval_contextual_blocks)]
+        train_records += [(block, 1) for block in take(train_arithmetic_pool, train_direct_blocks, "train direct arithmetic")]
+        train_records += [(block, 2) for block in take(train_contextual_pool, train_contextual_blocks, "train contextual arithmetic")]
+        eval_records += [(block, 1) for block in take(eval_arithmetic_pool, eval_direct_blocks, "held-out direct arithmetic")]
+        eval_records += [(block, 2) for block in take(eval_contextual_pool, eval_contextual_blocks, "held-out contextual arithmetic")]
     else:
-        train_records += [(block, 1) for block in take(train_arithmetic_pool, train_arithmetic_blocks)]
-        eval_records += [(block, 1) for block in take(eval_arithmetic_pool, eval_arithmetic_blocks)]
+        train_records += [(block, 1) for block in take(train_arithmetic_pool, train_arithmetic_blocks, "train arithmetic")]
+        eval_records += [(block, 1) for block in take(eval_arithmetic_pool, eval_arithmetic_blocks, "held-out arithmetic")]
     rng.shuffle(train_records)
     rng.shuffle(eval_records)
     metadata = {
@@ -199,6 +257,13 @@ def build_mixture(spec: MixtureSpec, prose_documents: list[str], tokenizer: Arit
         "train_prose_blocks": train_prose_blocks,
         "eval_prose_blocks": eval_prose_blocks,
         "source_split": f"{prose_split}; independent arithmetic seeds/templates",
+        "prose_source": spec.prose_source,
+        "prose_source_config": spec.prose_source_config,
+        "require_wikitext": spec.require_wikitext,
+        "require_external_prose": spec.require_external_prose,
+        "require_unique_source_blocks": spec.require_unique_source_blocks,
+        "train_prose_pool_blocks": len(train_prose_pool),
+        "eval_prose_pool_blocks": len(eval_prose_pool),
         "seed": spec.seed,
     }
     if exact_three_way:

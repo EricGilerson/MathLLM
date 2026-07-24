@@ -119,3 +119,16 @@ def test_generate_accepts_legacy_list_cache(monkeypatch):
 
     assert output.shape[1] == input_ids.shape[1] + 2
     assert input_lengths == [input_ids.shape[1], 1]
+
+
+def test_active_gpt2_path_cannot_attend_to_future_answer_tokens():
+    """Teacher forcing must not change prefix logits when future tokens append."""
+    model, _, tokenizer = _tiny_model()
+    prefix = tokenizer.encode("2+3=", return_tensors="pt")
+    extended = tokenizer.encode("2+3=5\n", return_tensors="pt")
+
+    with torch.inference_mode():
+        prefix_logits = model(input_ids=prefix, attention_mask=torch.ones_like(prefix))["logits"]
+        extended_logits = model(input_ids=extended, attention_mask=torch.ones_like(extended))["logits"]
+
+    torch.testing.assert_close(prefix_logits, extended_logits[:, : prefix.size(1)], rtol=0, atol=1e-5)

@@ -12,7 +12,11 @@ data:
   mixture_file: "pretraining_data/toy_full_20m_75_15_10.pt"
   tokenizer_file: "pretraining_data/toy_full_20m_75_15_10_tokenizer.json"
   tokenizer_vocab_size: 2048
-  prose_documents: 20000
+  # A bounded streamed FineWeb-Edu slice supplies enough diverse prose blocks
+  # without downloading its full corpus.
+  prose_documents: 50000
+  prose_source: "fineweb_edu"
+  prose_source_config: "sample-10BT"
   train_blocks: 200000
   eval_blocks: 5000
   # Exact fixed-length block mix: 75% prose, 15% canonical equations, and
@@ -22,6 +26,8 @@ data:
   contextual_equation_token_fraction: 0.10
   max_digits: 3
   invocation_fraction: 0.0
+  require_external_prose: true
+  require_unique_source_blocks: true
 
 training:
   output_dir: "pretraining_runs/toy_full_20m_75_15_10_seed20260723"
@@ -31,6 +37,8 @@ training:
   batch_size: 32
   learning_rate: 0.0003
   weight_decay: 0.01
-  max_steps: 50000
+  # 25k gives 103.2M token presentations per variant and leaves room for
+  # three matched seeds on a single A100.
+  max_steps: 25000
   eval_batches: 32
   eval_cases: 100

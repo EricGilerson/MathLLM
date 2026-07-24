@@ -20,6 +20,9 @@ data:
   contextual_equation_token_fraction: 0.10
   max_digits: 3
   invocation_fraction: 0.0
+  # The Mac pilot may use the fallback fixture; substantive CUDA runs may not.
+  require_wikitext: false
+  require_unique_source_blocks: false
 
 training:
   output_dir: "pretraining_runs/toy_mac_20m_75_15_10_seed20260723"

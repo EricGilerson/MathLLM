@@ -1,6 +1,7 @@
 """Tests for the fully-trainable toy-pretraining setup."""
 
 import torch
+import pytest
 
 from mathllm.pretraining.arithmetic_bpe_tokenizer import ArithmeticBPETokenizer
 from mathllm.pretraining.data import CONTEXTUAL_TRAINING_TEMPLATES, MixtureSpec, build_mixture, contextual_arithmetic_texts
@@ -64,6 +65,25 @@ def test_contextual_source_uses_multiple_instruction_templates():
 
     used_templates = [template for template in CONTEXTUAL_TRAINING_TEMPLATES if any(text.startswith(template) for text in texts)]
     assert len(used_templates) > 1
+
+
+def test_substantive_mixture_refuses_to_cycle_a_tiny_prose_source():
+    tokenizer = _tokenizer()
+    spec = MixtureSpec(
+        context_length=8,
+        train_blocks=40,
+        eval_blocks=20,
+        arithmetic_token_fraction=0.25,
+        max_digits=1,
+        invocation_fraction=0.0,
+        direct_equation_token_fraction=0.15,
+        contextual_equation_token_fraction=0.10,
+        require_unique_source_blocks=True,
+        seed=7,
+    )
+
+    with pytest.raises(ValueError, match="train prose has only"):
+        build_mixture(spec, ["tiny prose"], tokenizer)
 
 
 def test_toy_baseline_and_arb_are_fully_trainable():

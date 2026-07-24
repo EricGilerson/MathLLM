@@ -53,6 +53,11 @@ class ToyDataConfig:
     invocation_fraction: float = 0.25
     direct_equation_token_fraction: float | None = None
     contextual_equation_token_fraction: float | None = None
+    require_wikitext: bool = False
+    require_external_prose: bool = False
+    require_unique_source_blocks: bool = False
+    prose_source: str = "wikitext"
+    prose_source_config: str | None = None
 
 
 @dataclass
@@ -68,6 +73,9 @@ class ToyTrainingConfig:
     log_every: int = 25
     eval_batches: int = 4
     eval_cases: int = 8
+    # Optional intermediate held-out prose curve. Zero means evaluate only at
+    # the end, preserving the lightweight smoke-test behavior.
+    eval_every: int = 0
 
 
 @dataclass
@@ -94,7 +102,13 @@ def load_toy_config(path: str | Path) -> ToyExperimentConfig:
 
 
 def prepare_data(config: ToyExperimentConfig) -> dict[str, object]:
-    prose = load_prose_documents(config.data.prose_documents)
+    prose = load_prose_documents(
+        config.data.prose_documents,
+        require_wikitext=config.data.require_wikitext,
+        require_external_prose=config.data.require_external_prose,
+        source=config.data.prose_source,
+        source_config=config.data.prose_source_config,
+    )
     # Train BPE on the same distribution family, while the mixture builder
     # itself keeps train/eval source texts disjoint.
     tokenizer_text_count = max(4096, config.data.prose_documents)
@@ -120,6 +134,11 @@ def prepare_data(config: ToyExperimentConfig) -> dict[str, object]:
         seed=config.training.seed,
         direct_equation_token_fraction=config.data.direct_equation_token_fraction,
         contextual_equation_token_fraction=config.data.contextual_equation_token_fraction,
+        prose_source=config.data.prose_source,
+        prose_source_config=config.data.prose_source_config,
+        require_wikitext=config.data.require_wikitext,
+        require_external_prose=config.data.require_external_prose,
+        require_unique_source_blocks=config.data.require_unique_source_blocks,
     )
     mixture = build_mixture(spec, prose, tokenizer)
     save_mixture(config.data.mixture_file, mixture)
@@ -286,9 +305,12 @@ def run_training(config: ToyExperimentConfig, variant: str, prepare: bool = Fals
     model = build_model(config, variant, tokenizer).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=config.training.learning_rate, weight_decay=config.training.weight_decay)
     sequences = mixture["train_input_ids"]
+    eval_ids = mixture["eval_input_ids"]
+    eval_sources = mixture["eval_sources"]
     generator = torch.Generator().manual_seed(config.training.seed)
     order = torch.randperm(len(sequences), generator=generator)
     losses = []
+    prose_eval_history = []
     model.train()
     progress = tqdm(
         range(config.training.max_steps),
@@ -309,16 +331,26 @@ def run_training(config: ToyExperimentConfig, variant: str, prepare: bool = Fals
         optimizer.step()
         loss_value = float(loss.item())
         losses.append(loss_value)
+        if config.training.eval_every and (step + 1) % config.training.eval_every == 0:
+            prose_nll = _evaluate_loss(
+                model, eval_ids, eval_sources, 0, device,
+                config.training.eval_batches, config.training.batch_size,
+            )
+            prose_eval_history.append({
+                "step": step + 1,
+                "heldout_prose_nll": prose_nll,
+                "heldout_prose_ppl": math.exp(prose_nll),
+            })
+            model.train()
         if (step + 1) % config.training.log_every == 0 or step == 0 or step + 1 == config.training.max_steps:
             progress.set_postfix(loss=f"{loss_value:.4f}")
 
-    eval_ids = mixture["eval_input_ids"]
-    eval_sources = mixture["eval_sources"]
     prose_nll = _evaluate_loss(model, eval_ids, eval_sources, 0, device, config.training.eval_batches, config.training.batch_size)
     direct_arithmetic_nll = _evaluate_loss(model, eval_ids, eval_sources, 1, device, config.training.eval_batches, config.training.batch_size)
     contextual_arithmetic_nll = _evaluate_loss(model, eval_ids, eval_sources, 2, device, config.training.eval_batches, config.training.batch_size)
     metrics = {
         "train_loss": losses,
+        "heldout_prose_history": prose_eval_history,
         "heldout_prose_nll": prose_nll,
         "heldout_prose_ppl": math.exp(prose_nll),
         # Retain the original key for scripts that consumed the legacy

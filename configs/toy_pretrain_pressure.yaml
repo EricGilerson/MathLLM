@@ -1,0 +1,42 @@
+# One-seed capacity-pressure diagnostic. This keeps the same ~20M model and
+# optimizer as the main protocol, but makes arithmetic a 50% share of the
+# token blocks. It tests whether exact computation changes language-learning
+# efficiency under a fixed capacity/budget; it is not a substitute for the
+# main 75/15/10 multi-seed protocol.
+model:
+  n_layer: 6
+  n_embd: 512
+  n_head: 8
+  n_inner: 2048
+  baseline_n_inner: 2059
+
+data:
+  mixture_file: "pretraining_data/toy_pressure_20m_50_30_20.pt"
+  tokenizer_file: "pretraining_data/toy_pressure_20m_50_30_20_tokenizer.json"
+  tokenizer_vocab_size: 2048
+  prose_documents: 50000
+  prose_source: "fineweb_edu"
+  prose_source_config: "sample-10BT"
+  train_blocks: 100000
+  eval_blocks: 5000
+  arithmetic_token_fraction: 0.50
+  direct_equation_token_fraction: 0.30
+  contextual_equation_token_fraction: 0.20
+  max_digits: 3
+  invocation_fraction: 0.0
+  require_external_prose: true
+  require_unique_source_blocks: true
+
+training:
+  output_dir: "pretraining_runs/toy_pressure_20m_50_30_20_seed20260724"
+  device: "auto"
+  seed: 20260724
+  context_length: 128
+  batch_size: 32
+  learning_rate: 0.0003
+  weight_decay: 0.01
+  max_steps: 10000
+  log_every: 25
+  eval_batches: 32
+  eval_cases: 100
+  eval_every: 2500

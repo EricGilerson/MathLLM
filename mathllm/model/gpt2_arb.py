@@ -465,13 +465,14 @@ class TransformerWithARB(nn.Module):
         hidden_states = inputs_embeds + position_embeds
         hidden_states = transformer.drop(hidden_states)
 
-        # Build causal attention mask in GPT-2 format
-        # GPT-2 expects [batch, 1, 1, total_len] with 0.0 for attend, -10000.0 for mask
+        # Pass a complete 4D causal mask.  The manually-unrolled GPT-2 path
+        # bypasses GPT2Model.forward(), which normally constructs this mask.
+        # Supplying only its padding component can let an attention backend
+        # attend to future tokens during teacher-forced training.
         if attention_mask is not None:
-            extended_mask = attention_mask[:, None, None, :].to(
-                dtype=hidden_states.dtype
+            extended_mask = self._prepare_llama_mask(
+                attention_mask, hidden_states, past_len,
             )
-            extended_mask = (1.0 - extended_mask) * -10000.0
         else:
             extended_mask = None
 

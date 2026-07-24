@@ -3,7 +3,7 @@
 import torch
 
 from mathllm.pretraining.arithmetic_bpe_tokenizer import ArithmeticBPETokenizer
-from mathllm.pretraining.data import MixtureSpec, build_mixture
+from mathllm.pretraining.data import CONTEXTUAL_TRAINING_TEMPLATES, MixtureSpec, build_mixture, contextual_arithmetic_texts
 from mathllm.pretraining.experiment import ToyExperimentConfig, build_model, resolve_device
 
 
@@ -37,6 +37,33 @@ def test_mixture_has_exact_train_and_eval_block_ratios():
     assert int(mixture["eval_sources"].sum()) == 1
     assert mixture["train_input_ids"].shape == (12, 9)
     assert mixture["eval_input_ids"].shape == (4, 9)
+
+
+def test_three_way_mixture_has_exact_direct_and_contextual_block_counts():
+    tokenizer = _tokenizer()
+    spec = MixtureSpec(
+        context_length=8,
+        train_blocks=20,
+        eval_blocks=20,
+        arithmetic_token_fraction=0.25,
+        max_digits=1,
+        invocation_fraction=0.0,
+        direct_equation_token_fraction=0.15,
+        contextual_equation_token_fraction=0.10,
+        seed=7,
+    )
+    mixture = build_mixture(spec, ["A short prose document. " * 50], tokenizer)
+
+    assert torch.bincount(mixture["train_sources"], minlength=3).tolist() == [15, 3, 2]
+    assert torch.bincount(mixture["eval_sources"], minlength=3).tolist() == [15, 3, 2]
+    assert mixture["metadata"]["mixture_type"] == "three_way_exact_blocks"
+
+
+def test_contextual_source_uses_multiple_instruction_templates():
+    texts = contextual_arithmetic_texts(count=128, seed=7, max_digits=1)
+
+    used_templates = [template for template in CONTEXTUAL_TRAINING_TEMPLATES if any(text.startswith(template) for text in texts)]
+    assert len(used_templates) > 1
 
 
 def test_toy_baseline_and_arb_are_fully_trainable():

@@ -18,7 +18,14 @@ from transformers import GPT2Config, GPT2LMHeadModel
 from mathllm.config import ARBConfig, Config, RNSConfig, TrainingConfig
 from mathllm.model.gpt2_arb import GPT2WithARB
 from mathllm.pretraining.arithmetic_bpe_tokenizer import ArithmeticBPETokenizer
-from mathllm.pretraining.data import MixtureSpec, arithmetic_texts, build_mixture, load_prose_documents, save_mixture
+from mathllm.pretraining.data import (
+    MixtureSpec,
+    arithmetic_texts,
+    build_mixture,
+    contextual_arithmetic_texts,
+    load_prose_documents,
+    save_mixture,
+)
 
 
 @dataclass
@@ -44,6 +51,8 @@ class ToyDataConfig:
     arithmetic_token_fraction: float = 0.25
     max_digits: int = 2
     invocation_fraction: float = 0.25
+    direct_equation_token_fraction: float | None = None
+    contextual_equation_token_fraction: float | None = None
 
 
 @dataclass
@@ -88,11 +97,16 @@ def prepare_data(config: ToyExperimentConfig) -> dict[str, object]:
     prose = load_prose_documents(config.data.prose_documents)
     # Train BPE on the same distribution family, while the mixture builder
     # itself keeps train/eval source texts disjoint.
+    tokenizer_text_count = max(4096, config.data.prose_documents)
     tokenizer_training_texts = prose + arithmetic_texts(
-        max(4096, config.data.prose_documents),
+        tokenizer_text_count,
         config.training.seed,
         config.data.max_digits,
-        config.data.invocation_fraction,
+        0.0,
+    ) + contextual_arithmetic_texts(
+        tokenizer_text_count,
+        config.training.seed + 1,
+        config.data.max_digits,
     )
     tokenizer = ArithmeticBPETokenizer.train(tokenizer_training_texts, config.data.tokenizer_vocab_size)
     tokenizer.save(config.data.tokenizer_file)
@@ -104,6 +118,8 @@ def prepare_data(config: ToyExperimentConfig) -> dict[str, object]:
         max_digits=config.data.max_digits,
         invocation_fraction=config.data.invocation_fraction,
         seed=config.training.seed,
+        direct_equation_token_fraction=config.data.direct_equation_token_fraction,
+        contextual_equation_token_fraction=config.data.contextual_equation_token_fraction,
     )
     mixture = build_mixture(spec, prose, tokenizer)
     save_mixture(config.data.mixture_file, mixture)
@@ -181,8 +197,11 @@ def _forward(model: nn.Module, sequence: torch.Tensor):
     return model(input_ids=sequence, attention_mask=mask, labels=sequence)
 
 
-def _evaluate_loss(model: nn.Module, sequences: torch.Tensor, sources: torch.Tensor, source: int, device: torch.device, batches: int, batch_size: int) -> float:
-    matching = torch.where(sources == source)[0]
+def _evaluate_loss(model: nn.Module, sequences: torch.Tensor, sources: torch.Tensor, source: int | tuple[int, ...], device: torch.device, batches: int, batch_size: int) -> float:
+    if isinstance(source, tuple):
+        matching = torch.where(torch.isin(sources, torch.tensor(source, device=sources.device)))[0]
+    else:
+        matching = torch.where(sources == source)[0]
     if not len(matching):
         return float("nan")
     losses = []
@@ -205,23 +224,41 @@ def _generate(model: nn.Module, tokenizer: ArithmeticBPETokenizer, prompt: str, 
 
 
 def _arithmetic_metrics(model: nn.Module, tokenizer: ArithmeticBPETokenizer, config: ToyExperimentConfig, device: torch.device) -> dict[str, float]:
-    from mathllm.pretraining.data import _sample_expression
+    from mathllm.pretraining.data import (
+        CONTEXTUAL_HELDOUT_TEMPLATES,
+        CONTEXTUAL_TRAINING_TEMPLATES,
+        _sample_expression,
+    )
 
     rng = random.Random(config.training.seed + 99)
     direct_correct = 0
-    invocation_correct = 0
+    contextual_seen_correct = 0
+    contextual_unseen_correct = 0
     for _ in range(config.training.eval_cases):
         a, op, b, result = _sample_expression(rng, config.data.max_digits)
         expected = str(result)
         direct = _generate(model, tokenizer, f"{a}{op}{b}=", len(expected) + 2, device)
         direct_correct += int(direct[len(f"{a}{op}{b}="):].startswith(expected))
-        words = {"+": "plus", "-": "minus", "*": "times", "/": "divided by"}
-        prompt = f"Compute {a} {words[op]} {b}. Equation: "
-        expected_equation = f"{a}{op}{b}={result}"
-        invoked = _generate(model, tokenizer, prompt, len(expected_equation) + 2, device)
-        invocation_correct += int(invoked[len(prompt):].startswith(expected_equation))
+        # Sampling from each template family keeps evaluation practical while
+        # making both metrics reflect several wordings.
+        contextual_prompts = (
+            (rng.choice(CONTEXTUAL_TRAINING_TEMPLATES), True),
+            (rng.choice(CONTEXTUAL_HELDOUT_TEMPLATES), False),
+        )
+        for prefix, seen_template in contextual_prompts:
+            prompt = f"{prefix}{a}{op}{b}="
+            contextual = _generate(model, tokenizer, prompt, len(expected) + 2, device)
+            correct = int(contextual[len(prompt):].startswith(expected))
+            if seen_template:
+                contextual_seen_correct += correct
+            else:
+                contextual_unseen_correct += correct
     n = config.training.eval_cases
-    return {"direct_arithmetic_accuracy": direct_correct / n, "equation_invocation_accuracy": invocation_correct / n}
+    return {
+        "direct_arithmetic_accuracy": direct_correct / n,
+        "contextual_seen_arithmetic_accuracy": contextual_seen_correct / n,
+        "contextual_unseen_arithmetic_accuracy": contextual_unseen_correct / n,
+    }
 
 
 def resolve_device(requested: str) -> torch.device:
@@ -278,12 +315,18 @@ def run_training(config: ToyExperimentConfig, variant: str, prepare: bool = Fals
     eval_ids = mixture["eval_input_ids"]
     eval_sources = mixture["eval_sources"]
     prose_nll = _evaluate_loss(model, eval_ids, eval_sources, 0, device, config.training.eval_batches, config.training.batch_size)
-    arithmetic_nll = _evaluate_loss(model, eval_ids, eval_sources, 1, device, config.training.eval_batches, config.training.batch_size)
+    direct_arithmetic_nll = _evaluate_loss(model, eval_ids, eval_sources, 1, device, config.training.eval_batches, config.training.batch_size)
+    contextual_arithmetic_nll = _evaluate_loss(model, eval_ids, eval_sources, 2, device, config.training.eval_batches, config.training.batch_size)
     metrics = {
         "train_loss": losses,
         "heldout_prose_nll": prose_nll,
         "heldout_prose_ppl": math.exp(prose_nll),
-        "heldout_arithmetic_nll": arithmetic_nll,
+        # Retain the original key for scripts that consumed the legacy
+        # prose/direct-arithmetic mixture.  In a three-way run this is the
+        # canonical direct-equation slice, not an aggregate over both formats.
+        "heldout_arithmetic_nll": direct_arithmetic_nll,
+        "heldout_direct_arithmetic_nll": direct_arithmetic_nll,
+        "heldout_contextual_arithmetic_nll": contextual_arithmetic_nll,
         "parameter_count": sum(parameter.numel() for parameter in model.parameters()),
         "device": str(device),
         **_arithmetic_metrics(model, tokenizer, config, device),

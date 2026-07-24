@@ -1,0 +1,34 @@
+# Tiny CUDA preflight for the substantive three-way data path.  It checks data
+# preparation, device placement, both model variants, and the three metrics;
+# it is not a result to report.
+model:
+  n_layer: 4
+  n_embd: 144
+  n_head: 4
+  n_inner: 576
+  baseline_n_inner: 577
+
+data:
+  mixture_file: "pretraining_data/toy_cuda_smoke_75_15_10.pt"
+  tokenizer_file: "pretraining_data/toy_cuda_smoke_75_15_10_tokenizer.json"
+  tokenizer_vocab_size: 512
+  prose_documents: 256
+  train_blocks: 256
+  eval_blocks: 64
+  arithmetic_token_fraction: 0.25  # legacy aggregate, retained for compatibility
+  direct_equation_token_fraction: 0.15
+  contextual_equation_token_fraction: 0.10
+  max_digits: 2
+  invocation_fraction: 0.0
+
+training:
+  output_dir: "pretraining_runs/toy_cuda_smoke_75_15_10"
+  device: "cuda"
+  seed: 20260724
+  context_length: 64
+  batch_size: 4
+  learning_rate: 0.0003
+  weight_decay: 0.01
+  max_steps: 3
+  eval_batches: 2
+  eval_cases: 4

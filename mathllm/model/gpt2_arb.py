@@ -795,7 +795,14 @@ class TransformerWithARB(nn.Module):
         """
         self.eval()
         generated = input_ids
-        cache = DynamicCache()
+        # GPT-2 blocks in older supported Transformers releases use the
+        # legacy ``layer_past`` tuple/list format. Starting with DynamicCache
+        # in that mode works for the first call only: the forward pass returns
+        # a list and the next loop iteration must not call
+        # ``get_seq_length`` on it. Let the native GPT-2 path create its legacy
+        # cache on the first step; retain DynamicCache for newer GPT-2 and
+        # LLaMA-style paths.
+        cache = None if self.arch == ModelArch.GPT2 and self._cache_kwarg == "layer_past" else DynamicCache()
 
         # Enter generation cache mode on shared compute core
         self.compute_core.enter_generation_mode()
@@ -811,7 +818,14 @@ class TransformerWithARB(nn.Module):
         device = input_ids.device
         try:
             for _ in range(max_new_tokens):
-                cache_len = cache.get_seq_length() if cache else 0
+                if cache is None:
+                    cache_len = 0
+                elif hasattr(cache, "get_seq_length"):
+                    cache_len = cache.get_seq_length()
+                else:
+                    # Legacy cache: one (key, value) tuple per transformer
+                    # layer, with sequence length in the penultimate key dim.
+                    cache_len = cache[0][0].size(-2) if cache else 0
                 if cache_len == 0:
                     cur_input = generated
                 else:

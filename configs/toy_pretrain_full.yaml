@@ -9,18 +9,22 @@ model:
   baseline_n_inner: 2059
 
 data:
-  mixture_file: "pretraining_data/toy_full_20m_75_25.pt"
-  tokenizer_file: "pretraining_data/toy_full_20m_75_25_tokenizer.json"
+  mixture_file: "pretraining_data/toy_full_20m_75_15_10.pt"
+  tokenizer_file: "pretraining_data/toy_full_20m_75_15_10_tokenizer.json"
   tokenizer_vocab_size: 2048
   prose_documents: 20000
   train_blocks: 200000
   eval_blocks: 5000
-  arithmetic_token_fraction: 0.25
+  # Exact fixed-length block mix: 75% prose, 15% canonical equations, and
+  # 10% instruction-prefixed equations. The two equation sources are distinct.
+  arithmetic_token_fraction: 0.25  # legacy aggregate, retained for compatibility
+  direct_equation_token_fraction: 0.15
+  contextual_equation_token_fraction: 0.10
   max_digits: 3
-  invocation_fraction: 0.25
+  invocation_fraction: 0.0
 
 training:
-  output_dir: "pretraining_runs/toy_full_20m_75_25_seed20260723"
+  output_dir: "pretraining_runs/toy_full_20m_75_15_10_seed20260723"
   device: "auto"
   seed: 20260723
   context_length: 128

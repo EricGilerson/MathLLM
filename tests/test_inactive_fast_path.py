@@ -96,3 +96,26 @@ def test_valid_equation_keeps_custom_path_during_cached_generation():
     finally:
         model.compute_core.exit_generation_mode()
         model._generation_mode = False
+
+
+def test_generate_accepts_legacy_list_cache(monkeypatch):
+    """Generation must handle the cache format returned by older GPT-2."""
+    model, _, tokenizer = _tiny_model()
+    input_ids = tokenizer.encode("ordinary prose", return_tensors="pt")
+    input_lengths = []
+
+    def legacy_forward(input_ids, attention_mask=None, past_key_values=None, use_cache=False):
+        input_lengths.append(input_ids.size(1))
+        batch, seq_len = input_ids.shape
+        logits = torch.zeros(batch, seq_len, model.base_model.config.vocab_size)
+        legacy_cache = [(
+            torch.zeros(batch, 1, 1, 1),
+            torch.zeros(batch, 1, 1, 1),
+        )]
+        return {"logits": logits, "past_key_values": legacy_cache}
+
+    monkeypatch.setattr(model, "forward", legacy_forward)
+    output = model.generate(input_ids, max_new_tokens=2, greedy=True)
+
+    assert output.shape[1] == input_ids.shape[1] + 2
+    assert input_lengths == [input_ids.shape[1], 1]

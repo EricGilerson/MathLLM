@@ -72,6 +72,22 @@ def test_no_trigger_uses_native_base_forward_and_preserves_kv_cache(monkeypatch)
     assert detection_calls == 2
 
 
+def test_completed_equation_uses_native_base_forward(monkeypatch):
+    model, base, tokenizer = _tiny_model()
+    completed = tokenizer.encode("2+3=5", return_tensors="pt")
+
+    def fail_compute(*args, **kwargs):
+        raise AssertionError("A completed equation must not activate inference ARB")
+
+    monkeypatch.setattr(model.compute_core, "forward", fail_compute)
+    with torch.inference_mode():
+        wrapped = model(input_ids=completed, attention_mask=torch.ones_like(completed), use_cache=True)
+        direct = base(input_ids=completed, attention_mask=torch.ones_like(completed), use_cache=True, return_dict=True)
+
+    torch.testing.assert_close(wrapped["logits"], direct.logits)
+    assert wrapped["arb_extractions"] == {}
+
+
 def test_valid_equation_keeps_custom_path_during_cached_generation():
     model, _, tokenizer = _tiny_model()
     prompt = tokenizer.encode("2+3=", return_tensors="pt")

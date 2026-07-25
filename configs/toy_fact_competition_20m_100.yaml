@@ -1,0 +1,44 @@
+# Capacity-calibration stage: 100 arbitrary entity--value bindings.  This keeps
+# the 20M architecture, token mix, optimizer, and 25k-step budget fixed from
+# the 2,500-fact run.  It is the first viability check for exact retrieval.
+model:
+  n_layer: 6
+  n_embd: 512
+  n_head: 8
+  n_inner: 2048
+  baseline_n_inner: 2059
+
+data:
+  mixture_file: "pretraining_data/toy_fact_competition_20m_100.pt"
+  tokenizer_file: "pretraining_data/toy_fact_competition_20m_100_tokenizer.json"
+  tokenizer_vocab_size: 2048
+  prose_documents: 50000
+  prose_source: "fineweb_edu"
+  prose_source_config: "sample-10BT"
+  train_blocks: 200000
+  # At context length 128, the 300 held-out fact records yield only 42 unique
+  # blocks.  Keep 40 fact evaluation blocks (200 total) to preserve strict
+  # source uniqueness; this does not alter training or exact retrieval.
+  eval_blocks: 200
+  # 50% prose, 25% direct arithmetic, 5% contextual equations, 20% facts.
+  arithmetic_token_fraction: 0.30
+  direct_equation_token_fraction: 0.25
+  contextual_equation_token_fraction: 0.05
+  fact_token_fraction: 0.20
+  fact_count: 100
+  max_digits: 3
+  require_external_prose: true
+  require_unique_source_blocks: true
+
+training:
+  output_dir: "pretraining_runs/toy_fact_competition_20m_100_seed20260730"
+  device: "auto"
+  seed: 20260730
+  context_length: 128
+  batch_size: 32
+  learning_rate: 0.0003
+  weight_decay: 0.01
+  max_steps: 25000
+  log_every: 25
+  eval_batches: 32
+  eval_cases: 100

@@ -95,4 +95,19 @@ def fact_seen_template_cases(count: int, seed: int, facts: list[Fact]) -> list[t
 
 
 def fact_eval_texts(count: int, seed: int, facts: list[Fact]) -> list[str]:
-    return [f"{prompt} {answer}.\n" for prompt, answer in fact_eval_cases(count, seed, facts)]
+    """Build a held-out-template evaluation corpus without duplicate records.
+
+    A small fact vocabulary can otherwise provide only one held-out record per
+    binding, which is insufficient to form the configured number of *unique*
+    fixed-length evaluation blocks.  Each fact therefore appears once under
+    each disjoint held-out wording.  These records never use a training query
+    template; they are only for the held-out loss source, not fact accuracy.
+    """
+    rng = random.Random(seed)
+    records = [
+        template.format(entity=fact.entity, value=fact.value) + "\n"
+        for fact in facts
+        for template in _EVAL_Q
+    ]
+    rng.shuffle(records)
+    return records[:min(count, len(records))]

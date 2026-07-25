@@ -11,6 +11,12 @@ synthetic tool-relay path measures GPU generation -> CPU handoff/calculation
 -> resumed GPU generation. The base model is not tool-call trained, so tool
 arguments are deterministically extracted from the direct input equation; the
 relay is a latency measurement, not an agent-capability evaluation.
+
+The report has two distinct base-model comparisons: (1) no-trigger prose,
+which measures ordinary-text containment, and (2) direct equations, which
+measures the active ARB path against simply asking the unmodified base model to
+continue the same equation with no calculator at all.  Do not conflate either
+with the separate CPU-relay boundary.
 """
 
 from __future__ import annotations
@@ -205,6 +211,65 @@ def _measure_arb_prompt_to_answer(arb, tokenizer, prompts, max_new_tokens, warmu
     return samples, correct
 
 
+def _measure_paired_direct_equations(
+    base,
+    arb,
+    tokenizer,
+    prompts: list[tuple[str, str]],
+    max_new_tokens: int,
+    warmup: int,
+    repetitions: int,
+    device: torch.device,
+    progress=None,
+):
+    """Pair raw-base and ARB continuations of the identical direct equation.
+
+    This is the missing ``no calculator`` active-path condition.  Both sides
+    include prompt tokenization, host-to-device transfer, greedy generation,
+    synchronization, and decoding.  The ARB side also includes every enabled
+    deployed ARB component (detection, compute, injectors, and the gated LoRA
+    LM-head adapter); it is therefore an end-to-end deployment comparison, not
+    an isolated arithmetic-core microbenchmark.  Alternating order avoids
+    assigning a systematic first/second timing effect to either variant.
+    """
+    pad_token_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id
+
+    def run_once(model, is_arb: bool, prompt: str, expected: str) -> dict:
+        _synchronize(device)
+        start = time.perf_counter()
+        input_ids = tokenizer.encode(prompt, return_tensors="pt").to(device)
+        output = _generate(model, input_ids, max_new_tokens, is_arb, pad_token_id)
+        continuation = tokenizer.decode(output[0, input_ids.size(1):], skip_special_tokens=True).strip()
+        _synchronize(device)
+        elapsed = time.perf_counter() - start
+        return {
+            "latency_seconds": elapsed,
+            "generated_tokens": int(output.size(1) - input_ids.size(1)),
+            "tokens_per_second": int(output.size(1) - input_ids.size(1)) / elapsed,
+            "answer_prefix_match": continuation.startswith(expected),
+        }
+
+    for prompt, expected in prompts[:warmup]:
+        run_once(base, False, prompt, expected)
+        run_once(arb, True, prompt, expected)
+    _synchronize(device)
+    base_samples, arb_samples, deltas = [], [], []
+    for index in range(repetitions):
+        for prompt, expected in prompts:
+            if index % 2 == 0:
+                base_sample = run_once(base, False, prompt, expected)
+                arb_sample = run_once(arb, True, prompt, expected)
+            else:
+                arb_sample = run_once(arb, True, prompt, expected)
+                base_sample = run_once(base, False, prompt, expected)
+            base_samples.append(base_sample)
+            arb_samples.append(arb_sample)
+            deltas.append(arb_sample["latency_seconds"] - base_sample["latency_seconds"])
+            if progress is not None:
+                progress.update(2)
+    return base_samples, arb_samples, deltas
+
+
 def _measure_in_process_tool_relay(
     base,
     tokenizer,
@@ -337,7 +402,13 @@ def main() -> None:
     pad_token_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id
 
     prompts = arithmetic_prompts(args.calculator_cases, args.seed)
-    timed_samples = 2 * len(args.prompt_lengths) * args.repetitions + 2 * args.calculator_cases * args.repetitions
+    # No-trigger base/ARB pairs, direct-equation base/ARB pairs, standalone
+    # ARB direct answers, and the synthetic tool relay.  CPU-only calculator
+    # timing is intentionally not displayed in the GPU progress total.
+    timed_samples = (
+        2 * len(args.prompt_lengths) * args.repetitions
+        + 4 * args.calculator_cases * args.repetitions
+    )
     with tqdm(total=timed_samples, desc="Benchmark timed samples", unit="sample", dynamic_ncols=True) as progress:
         model_rows = []
         for length in args.prompt_lengths:
@@ -369,6 +440,10 @@ def main() -> None:
             })
 
         calculator_samples, calculator_correct = _measure_cpu_calculator(prompts, args.warmup, args.repetitions)
+        direct_base_samples, direct_arb_samples, direct_paired_deltas = _measure_paired_direct_equations(
+            base, arb, tokenizer, prompts, args.max_new_tokens, args.warmup,
+            args.repetitions, device, progress,
+        )
         arb_samples, arb_correct = _measure_arb_prompt_to_answer(
             arb, tokenizer, prompts, args.max_new_tokens, args.warmup, args.repetitions, device, progress,
         )
@@ -377,6 +452,8 @@ def main() -> None:
             args.warmup, args.repetitions, device, progress,
         )
     calculator_summary, arb_arithmetic_summary = _summary(calculator_samples), _summary(arb_samples)
+    direct_base_summary = _summary(direct_base_samples)
+    direct_arb_summary = _summary(direct_arb_samples)
     tool_relay_summary = _summary(tool_relay_samples)
     tool_relay_summary.update({
         "pre_tool_generation_mean_seconds": statistics.mean(sample["pre_tool_generation_seconds"] for sample in tool_relay_samples),
@@ -419,6 +496,42 @@ def main() -> None:
             "answer_prefix_matches": arb_correct, "summary": arb_arithmetic_summary,
             "latency_ratio_arb_over_cpu_calculator": (
                 arb_arithmetic_summary["latency_mean_seconds"] / calculator_summary["latency_mean_seconds"]
+            ),
+        },
+        "direct_equation_no_calculator_vs_arb": {
+            "boundary": (
+                "identical direct equation prompt string -> tokenizer + host-to-device copy + "
+                "synchronized greedy generation + decoded continuation; base receives no calculator"
+            ),
+            "arb_components_included": (
+                "valid-equation detection, ARB compute and injection, and every enabled "
+                "ARB adapter including the gated LoRA LM-head projection"
+            ),
+            "interpretation": (
+                "end-to-end deployed ARB-versus-raw-base comparison; its delta must not be "
+                "attributed to the arithmetic compute core alone"
+            ),
+            "measurement_order": "alternating base->ARB / ARB->base pairs per equation",
+            "cases_per_repetition": args.calculator_cases,
+            "total_cases_per_variant": total_cases,
+            "base_no_calculator": {
+                "answer_prefix_matches": sum(sample["answer_prefix_match"] for sample in direct_base_samples),
+                "summary": direct_base_summary,
+            },
+            "arb": {
+                "answer_prefix_matches": sum(sample["answer_prefix_match"] for sample in direct_arb_samples),
+                "summary": direct_arb_summary,
+            },
+            "paired_arb_minus_base": {
+                "samples": len(direct_paired_deltas),
+                "mean_seconds": statistics.mean(direct_paired_deltas),
+                "median_seconds": statistics.median(direct_paired_deltas),
+                "min_seconds": min(direct_paired_deltas),
+                "max_seconds": max(direct_paired_deltas),
+                "samples_seconds": direct_paired_deltas,
+            },
+            "latency_ratio_arb_over_base_no_calculator": (
+                direct_arb_summary["latency_mean_seconds"] / direct_base_summary["latency_mean_seconds"]
             ),
         },
         "synthetic_in_process_tool_relay": {

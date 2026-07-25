@@ -1,4 +1,4 @@
-from mathllm.pretraining.fact_benchmark import fact_eval_cases, fact_training_texts, make_facts
+from mathllm.pretraining.fact_benchmark import fact_eval_cases, fact_seen_template_cases, fact_training_texts, make_facts
 
 
 def test_fact_generator_is_deterministic_and_has_unique_bindings():
@@ -14,4 +14,11 @@ def test_train_and_eval_use_disjoint_question_wording_without_local_copying():
     cases = fact_eval_cases(64, 31, facts)
     assert any(text.startswith("Question: What vocation") for text in train)
     assert all("Identify" in prompt or "What work" in prompt or "works as what" in prompt for prompt, _ in cases)
+    assert all(answer not in prompt for prompt, answer in cases)
+
+
+def test_seen_probe_uses_training_question_forms_without_answer_leakage():
+    facts = make_facts(64, 23)
+    cases = fact_seen_template_cases(64, 31, facts)
+    assert all("vocation" in prompt for prompt, _ in cases)
     assert all(answer not in prompt for prompt, answer in cases)

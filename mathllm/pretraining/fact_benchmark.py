@@ -84,5 +84,15 @@ def fact_eval_cases(count: int, seed: int, facts: list[Fact]) -> list[tuple[str,
     ]
 
 
+def fact_seen_template_cases(count: int, seed: int, facts: list[Fact]) -> list[tuple[str, str]]:
+    """Same binding probe, but with question wording seen during training."""
+    rng = random.Random(seed)
+    selected = [facts[index % len(facts)] for index in rng.sample(range(len(facts)), min(count, len(facts)))]
+    return [
+        (rng.choice(_TRAIN_Q).format(entity=fact.entity, value="")[:-1], fact.value)
+        for fact in selected
+    ]
+
+
 def fact_eval_texts(count: int, seed: int, facts: list[Fact]) -> list[str]:
     return [f"{prompt} {answer}.\n" for prompt, answer in fact_eval_cases(count, seed, facts)]

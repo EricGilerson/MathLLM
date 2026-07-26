@@ -1,0 +1,44 @@
+# High-pressure fixed-vocabulary calibration.  The 256-fragment key bank
+# permits 65,536 two-token identities.  All 50k mappings share the same
+# 512-value answer bank, so neither variant receives one embedding row per
+# fact and the paired parameter budget remains matched.
+model:
+  n_layer: 6
+  n_embd: 512
+  n_head: 8
+  n_inner: 2048
+  baseline_n_inner: 2059
+
+data:
+  mixture_file: "pretraining_data/toy_compositional_fact_capacity_20m_50k.pt"
+  tokenizer_file: "pretraining_data/toy_compositional_fact_capacity_20m_50k_tokenizer.json"
+  tokenizer_vocab_size: 2048
+  prose_documents: 50000
+  prose_source: "fineweb_edu"
+  prose_source_config: "sample-10BT"
+  train_blocks: 200000
+  eval_blocks: 1000
+  arithmetic_token_fraction: 0.30
+  direct_equation_token_fraction: 0.25
+  contextual_equation_token_fraction: 0.05
+  fact_token_fraction: 0.20
+  fact_count: 50000
+  fact_format: "compositional"
+  fact_key_vocab_size: 256
+  fact_value_vocab_size: 512
+  max_digits: 3
+  require_external_prose: true
+  require_unique_source_blocks: true
+
+training:
+  output_dir: "pretraining_runs/toy_compositional_fact_capacity_20m_50k_seed20260803"
+  device: "auto"
+  seed: 20260803
+  context_length: 128
+  batch_size: 32
+  learning_rate: 0.0003
+  weight_decay: 0.01
+  max_steps: 25000
+  log_every: 25
+  eval_batches: 32
+  eval_cases: 100

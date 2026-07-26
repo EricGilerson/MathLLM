@@ -341,25 +341,32 @@ def _fact_metrics(model, tokenizer, cases, device, *, atomic: bool = False) -> d
         encoded = [tokenizer.encode(prompt) for prompt in prompts]
         if len({len(ids) for ids in encoded}) != 1:
             raise ValueError("Atomic fact prompts must have a fixed token length")
-        target_ids = torch.tensor([tokenizer.encode(value) for value in expected], device=device)
-        if target_ids.ndim != 2 or target_ids.shape[1] != 1:
+        target_ids = [tokenizer.encode(value) for value in expected]
+        if any(len(ids) != 1 for ids in target_ids):
             raise ValueError("Atomic fact values must each encode to exactly one token")
-        inputs = torch.tensor(encoded, dtype=torch.long, device=device)
         model.eval()
+        correct_count = 0
+        nll_sum = 0.0
+        # A 50k-binding calibration would otherwise materialize a large
+        # [50000, prompt_length, vocab] logits tensor.  Chunking leaves the
+        # one-token teacher-forced protocol unchanged and is GPU-memory safe.
         with torch.inference_mode():
-            outputs = model(input_ids=inputs, attention_mask=torch.ones_like(inputs))
-            logits = outputs["logits"] if isinstance(outputs, dict) else outputs.logits
-            answer_logits = logits[:, -1, :]
-            answer_nll = F.cross_entropy(answer_logits, target_ids[:, 0])
-            prediction = answer_logits.argmax(dim=-1)
-        correct = float((prediction == target_ids[:, 0]).float().mean().item())
+            for start in range(0, len(encoded), 1024):
+                inputs = torch.tensor(encoded[start:start + 1024], dtype=torch.long, device=device)
+                targets = torch.tensor(target_ids[start:start + 1024], dtype=torch.long, device=device)[:, 0]
+                outputs = model(input_ids=inputs, attention_mask=torch.ones_like(inputs))
+                logits = outputs["logits"] if isinstance(outputs, dict) else outputs.logits
+                answer_logits = logits[:, -1, :]
+                nll_sum += float(F.cross_entropy(answer_logits, targets, reduction="sum").item())
+                correct_count += int((answer_logits.argmax(dim=-1) == targets).sum().item())
+        correct = correct_count / len(cases)
         return {
             # Retain the existing key for paired-run summaries.  These two
             # accuracy names are deliberately explicit about the protocol.
             "heldout_fact_accuracy": correct,
             "fact_teacher_forced_top1_accuracy": correct,
             "fact_greedy_one_token_accuracy": correct,
-            "fact_answer_nll": float(answer_nll.item()),
+            "fact_answer_nll": nll_sum / len(cases),
             "fact_eval_cases": len(cases),
         }
     correct = 0

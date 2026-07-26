@@ -174,6 +174,62 @@ def _measure_detection_only(detector, input_ids, eq_token_id, warmup, repetition
     return samples
 
 
+def _measure_arb_compute_core(arb, prompt_ids, warmup, repetitions, device, progress=None):
+    """Time ARB stages 1--3 on already-tokenized, device-resident equations.
+
+    This is a component diagnostic, not an end-to-end model comparison: it
+    includes strict detection, operand extraction, RNS encode/compute/CRT, and
+    result selection, but excludes transformer execution, injectors, the LM
+    head/LoRA, Python tokenization, and host-to-device transfer.  It therefore
+    quantifies the arithmetic core without attributing the full active-path
+    delta to that core.
+    """
+    if not prompt_ids:
+        return {"wall_clock": [], "cuda_events": []}
+
+    def run_once(input_ids):
+        # A preceding generation benchmark normally clears this state, but
+        # make the component boundary explicit and independent of call order.
+        arb.compute_core.exit_generation_mode()
+        with torch.inference_mode():
+            arb.compute_core(input_ids)
+
+    for index in range(warmup):
+        run_once(prompt_ids[index % len(prompt_ids)])
+    _synchronize(device)
+    wall_clock_samples = []
+    cuda_event_samples = []
+    for _ in range(repetitions):
+        for input_ids in prompt_ids:
+            _synchronize(device)
+            start = time.perf_counter()
+            run_once(input_ids)
+            _synchronize(device)
+            wall_clock_samples.append({"latency_seconds": time.perf_counter() - start})
+            if progress is not None:
+                progress.update(1)
+            if device.type == "cuda":
+                # CUDA events measure the device stream timeline. Unlike the
+                # synchronized host wall clock above, this excludes Python
+                # tokenization and the explicit before/after synchronization
+                # calls. It still includes any GPU idle time caused by eager
+                # dispatch between kernels, so it is not a pure FLOP count.
+                start_event = torch.cuda.Event(enable_timing=True)
+                end_event = torch.cuda.Event(enable_timing=True)
+                _synchronize(device)
+                start_event.record()
+                run_once(input_ids)
+                end_event.record()
+                torch.cuda.synchronize(device)
+                cuda_event_samples.append({
+                    "latency_seconds": start_event.elapsed_time(end_event) / 1_000.0,
+                })
+                if progress is not None:
+                    progress.update(1)
+    arb.compute_core.exit_generation_mode()
+    return {"wall_clock": wall_clock_samples, "cuda_events": cuda_event_samples}
+
+
 def _measure_cpu_calculator(prompts: list[tuple[str, str]], warmup: int, repetitions: int) -> tuple[list[dict], int]:
     for prompt, _ in prompts[:warmup]:
         in_process_cpu_calculator(prompt)
@@ -380,6 +436,14 @@ def main() -> None:
     parser.add_argument("--repetitions", type=int, default=20)
     parser.add_argument("--calculator-cases", type=int, default=100)
     parser.add_argument("--detector-repetitions", type=int, default=1000)
+    parser.add_argument(
+        "--component-timings", action="store_true",
+        help="Also time the pre-tokenized/device-resident ARB compute core (stages 1--3).",
+    )
+    parser.add_argument(
+        "--components-only", action="store_true",
+        help="Write only the ARB compute-core diagnostic; requires --component-timings.",
+    )
     parser.add_argument("--tool-pre-new-tokens", type=int, default=1)
     parser.add_argument(
         "--tool-post-new-tokens", type=int, default=None,
@@ -393,6 +457,8 @@ def main() -> None:
         parser.error("case counts, repetitions, detector repetitions, and pre-tool tokens must be positive")
     if args.tool_post_new_tokens <= 0:
         parser.error("--max-new-tokens must exceed --tool-pre-new-tokens so the relay can generate a post-tool answer")
+    if args.components_only and not args.component_timings:
+        parser.error("--components-only requires --component-timings")
 
     device = torch.device(args.device)
     arb, tokenizer, _ = GPT2WithARB.from_exported_model(args.model_dir, device=device)
@@ -402,6 +468,65 @@ def main() -> None:
     pad_token_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id
 
     prompts = arithmetic_prompts(args.calculator_cases, args.seed)
+    direct_prompt_ids = [
+        tokenizer.encode(prompt, return_tensors="pt").to(device)
+        for prompt, _ in prompts
+    ]
+    if args.components_only:
+        with tqdm(
+            total=(2 if device.type == "cuda" else 1) * args.calculator_cases * args.repetitions,
+            desc="ARB compute-core samples",
+            unit="sample",
+            dynamic_ncols=True,
+        ) as progress:
+            compute_core_samples = _measure_arb_compute_core(
+                arb, direct_prompt_ids, args.warmup, args.repetitions, device, progress,
+            )
+        hardware = {
+            "platform": platform.platform(),
+            "python": platform.python_version(),
+            "torch": torch.__version__,
+            "cuda_runtime": torch.version.cuda,
+        }
+        if device.type == "cuda":
+            properties = torch.cuda.get_device_properties(device)
+            hardware.update({
+                "gpu_name": torch.cuda.get_device_name(device),
+                "gpu_total_memory_bytes": properties.total_memory,
+                "gpu_compute_capability": f"{properties.major}.{properties.minor}",
+                "cudnn": torch.backends.cudnn.version(),
+            })
+        report = {
+            "date": str(date.today()),
+            "model_dir": args.model_dir,
+            "device": str(device),
+            "hardware": hardware,
+            "warmup": args.warmup,
+            "repetitions": args.repetitions,
+            "component_only": True,
+            "arb_compute_core_only": {
+                "boundary": (
+                    "pre-tokenized, device-resident direct equation IDs -> ARB stages 1--3 "
+                    "(detection, extraction, RNS encode/compute/CRT, result selection); excludes "
+                    "transformer, injectors, LM-head/LoRA, tokenization, and host-to-device transfer"
+                ),
+                "wall_clock_summary": _summary(compute_core_samples["wall_clock"]),
+                "cuda_event_summary": (
+                    _summary(compute_core_samples["cuda_events"])
+                    if compute_core_samples["cuda_events"] else None
+                ),
+                "interpretation": (
+                    "component diagnostic to read alongside a completed end-to-end base/ARB run; "
+                    "do not subtract it from total latency or assign the remaining cost to one cause. "
+                    "CUDA events measure the stream timeline, not pure arithmetic FLOPs."
+                ),
+            },
+        }
+        output = Path(args.output)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(json.dumps(report, indent=2) + "\n")
+        print(json.dumps(report, indent=2))
+        return
     # No-trigger base/ARB pairs, direct-equation base/ARB pairs, standalone
     # ARB direct answers, and the synthetic tool relay.  CPU-only calculator
     # timing is intentionally not displayed in the GPU progress total.
@@ -409,6 +534,8 @@ def main() -> None:
         2 * len(args.prompt_lengths) * args.repetitions
         + 4 * args.calculator_cases * args.repetitions
     )
+    if args.component_timings:
+        timed_samples += (2 if device.type == "cuda" else 1) * args.calculator_cases * args.repetitions
     with tqdm(total=timed_samples, desc="Benchmark timed samples", unit="sample", dynamic_ncols=True) as progress:
         model_rows = []
         for length in args.prompt_lengths:
@@ -451,6 +578,12 @@ def main() -> None:
             base, tokenizer, prompts, args.tool_pre_new_tokens, args.tool_post_new_tokens,
             args.warmup, args.repetitions, device, progress,
         )
+        compute_core_samples = (
+            _measure_arb_compute_core(
+                arb, direct_prompt_ids, args.warmup, args.repetitions, device, progress,
+            )
+            if args.component_timings else []
+        )
     calculator_summary, arb_arithmetic_summary = _summary(calculator_samples), _summary(arb_samples)
     direct_base_summary = _summary(direct_base_samples)
     direct_arb_summary = _summary(direct_arb_samples)
@@ -486,6 +619,26 @@ def main() -> None:
         "warmup": args.warmup, "repetitions": args.repetitions,
         "detector_repetitions": args.detector_repetitions,
         "detector_boundary": "device-resident token IDs -> token-level valid-equation decision; excludes tokenizer and full ARB compute",
+        "arb_compute_core_only": (
+            {
+                "boundary": (
+                    "pre-tokenized, device-resident direct equation IDs -> ARB stages 1--3 "
+                    "(detection, extraction, RNS encode/compute/CRT, result selection); excludes "
+                    "transformer, injectors, LM-head/LoRA, tokenization, and host-to-device transfer"
+                ),
+                "wall_clock_summary": _summary(compute_core_samples["wall_clock"]),
+                "cuda_event_summary": (
+                    _summary(compute_core_samples["cuda_events"])
+                    if compute_core_samples["cuda_events"] else None
+                ),
+                "interpretation": (
+                    "component diagnostic only; do not subtract it from end-to-end latency or "
+                    "attribute the remaining deployed active-path delta to one implementation detail. "
+                    "CUDA events measure the stream timeline, not pure arithmetic FLOPs."
+                ),
+            }
+            if compute_core_samples else None
+        ),
         "model_generation": model_rows,
         "in_process_cpu_calculator": {
             "cases_per_repetition": args.calculator_cases, "total_cases": total_cases,

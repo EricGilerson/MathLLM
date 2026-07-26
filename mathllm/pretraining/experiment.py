@@ -56,6 +56,8 @@ class ToyDataConfig:
     fact_token_fraction: float = 0.0
     fact_count: int = 0
     fact_format: str = "natural"
+    fact_key_vocab_size: int = 128
+    fact_value_vocab_size: int = 512
     require_wikitext: bool = False
     require_external_prose: bool = False
     require_unique_source_blocks: bool = False
@@ -127,17 +129,34 @@ def prepare_data(config: ToyExperimentConfig) -> dict[str, object]:
     )
     atomic_tokens: list[str] = []
     if config.data.fact_token_fraction:
-        if config.data.fact_format == "atomic":
-            from mathllm.pretraining.fact_benchmark import (
-                atomic_fact_special_tokens,
-                atomic_fact_training_texts,
-                make_atomic_facts,
-            )
-            facts = make_atomic_facts(config.data.fact_count, config.training.seed + 5)
-            atomic_tokens = atomic_fact_special_tokens(facts)
-            tokenizer_training_texts += atomic_fact_training_texts(
-                tokenizer_text_count, config.training.seed + 6, facts,
-            )
+        if config.data.fact_format in {"atomic", "compositional"}:
+            if config.data.fact_format == "compositional":
+                from mathllm.pretraining.fact_benchmark import (
+                    compositional_fact_special_tokens,
+                    compositional_fact_training_texts,
+                    make_compositional_facts,
+                )
+                facts = make_compositional_facts(
+                    config.data.fact_count, config.training.seed + 5,
+                    config.data.fact_key_vocab_size, config.data.fact_value_vocab_size,
+                )
+                atomic_tokens = compositional_fact_special_tokens(
+                    config.data.fact_key_vocab_size, config.data.fact_value_vocab_size,
+                )
+                tokenizer_training_texts += compositional_fact_training_texts(
+                    tokenizer_text_count, config.training.seed + 6, facts,
+                )
+            else:
+                from mathllm.pretraining.fact_benchmark import (
+                    atomic_fact_special_tokens,
+                    atomic_fact_training_texts,
+                    make_atomic_facts,
+                )
+                facts = make_atomic_facts(config.data.fact_count, config.training.seed + 5)
+                atomic_tokens = atomic_fact_special_tokens(facts)
+                tokenizer_training_texts += atomic_fact_training_texts(
+                    tokenizer_text_count, config.training.seed + 6, facts,
+                )
         else:
             from mathllm.pretraining.fact_benchmark import fact_training_texts, make_facts
             tokenizer_training_texts += fact_training_texts(
@@ -163,6 +182,8 @@ def prepare_data(config: ToyExperimentConfig) -> dict[str, object]:
         fact_token_fraction=config.data.fact_token_fraction,
         fact_count=config.data.fact_count,
         fact_format=config.data.fact_format,
+        fact_key_vocab_size=config.data.fact_key_vocab_size,
+        fact_value_vocab_size=config.data.fact_value_vocab_size,
         prose_source=config.data.prose_source,
         prose_source_config=config.data.prose_source_config,
         require_wikitext=config.data.require_wikitext,
@@ -437,7 +458,7 @@ def run_training(config: ToyExperimentConfig, variant: str, prepare: bool = Fals
             tokenizer,
             mixture.get("fact_eval_cases", []),
             device,
-            atomic=config.data.fact_format == "atomic",
+            atomic=config.data.fact_format in {"atomic", "compositional"},
         ),
     }
     output_dir = Path(config.training.output_dir) / variant

@@ -32,6 +32,14 @@ class Fact:
     value: str
 
 
+@dataclass(frozen=True)
+class CompositionalFact:
+    """An arbitrary two-token key mapped to one one-token value."""
+    key_a: str
+    key_b: str
+    value: str
+
+
 def _alpha_identifier(index: int) -> str:
     """Fixed-width alphabetic code with no digits for opaque fact tokens."""
     alphabet = "abcdefghijklmnopqrstuvwxyz"
@@ -87,6 +95,61 @@ def atomic_fact_training_texts(count: int, seed: int, facts: list[Fact]) -> list
 def atomic_fact_eval_cases(facts: list[Fact]) -> list[tuple[str, str]]:
     """One next-token query per stored binding; no answer appears in its prompt."""
     return [(f"{fact.entity}<factmap>", fact.value) for fact in facts]
+
+
+def make_compositional_facts(
+    count: int,
+    seed: int,
+    key_vocab_size: int = 128,
+    value_vocab_size: int = 512,
+) -> list[CompositionalFact]:
+    """Create arbitrary bindings without allocating one embedding per fact.
+
+    Keys are pairs from a fixed token bank, so up to ``key_vocab_size**2``
+    distinct identities are possible while vocabulary/model size stays fixed.
+    Values are drawn from an independent, balanced one-token label bank.
+    """
+    if count <= 0 or count > key_vocab_size * key_vocab_size:
+        raise ValueError("count must be positive and no larger than key_vocab_size squared")
+    if value_vocab_size <= 1:
+        raise ValueError("value_vocab_size must be at least two")
+    rng = random.Random(seed)
+    keys = [
+        (f"<factkey{_alpha_identifier(a)}>", f"<factkey{_alpha_identifier(b)}>")
+        for a in range(key_vocab_size)
+        for b in range(key_vocab_size)
+    ]
+    rng.shuffle(keys)
+    values = [f"<factvalue{_alpha_identifier(index)}>" for index in range(value_vocab_size)]
+    assignments = [values[index % value_vocab_size] for index in range(count)]
+    rng.shuffle(assignments)
+    return [CompositionalFact(key_a, key_b, value) for (key_a, key_b), value in zip(keys[:count], assignments)]
+
+
+def compositional_fact_special_tokens(
+    key_vocab_size: int = 128,
+    value_vocab_size: int = 512,
+) -> list[str]:
+    return (
+        ["<factmap>"]
+        + [f"<factkey{_alpha_identifier(index)}>" for index in range(key_vocab_size)]
+        + [f"<factvalue{_alpha_identifier(index)}>" for index in range(value_vocab_size)]
+    )
+
+
+def compositional_fact_training_texts(count: int, seed: int, facts: list[CompositionalFact]) -> list[str]:
+    """Shuffled passes prevent local repeated-key copying in one context."""
+    rng = random.Random(seed)
+    texts = []
+    while len(texts) < count:
+        order = list(facts)
+        rng.shuffle(order)
+        texts.extend(f"{fact.key_a}{fact.key_b}<factmap>{fact.value}\n" for fact in order)
+    return texts[:count]
+
+
+def compositional_fact_eval_cases(facts: list[CompositionalFact]) -> list[tuple[str, str]]:
+    return [(f"{fact.key_a}{fact.key_b}<factmap>", fact.value) for fact in facts]
 
 
 def _word(index: int, prefix: str) -> str:

@@ -2,12 +2,16 @@ from mathllm.pretraining.fact_benchmark import (
     atomic_fact_eval_cases,
     atomic_fact_special_tokens,
     atomic_fact_training_texts,
+    compositional_fact_eval_cases,
+    compositional_fact_special_tokens,
+    compositional_fact_training_texts,
     fact_eval_cases,
     fact_eval_texts,
     fact_seen_template_cases,
     fact_training_texts,
     make_facts,
     make_atomic_facts,
+    make_compositional_facts,
 )
 
 
@@ -52,3 +56,12 @@ def test_atomic_fact_protocol_has_opaque_single_target_queries():
     assert len({record.split("<factmap>", 1)[0] for record in records}) == 64
     cases = atomic_fact_eval_cases(facts)
     assert all(answer not in prompt for prompt, answer in cases)
+
+
+def test_compositional_facts_keep_token_bank_fixed_while_scaling_bindings():
+    facts = make_compositional_facts(5_000, 23)
+    assert len({(fact.key_a, fact.key_b) for fact in facts}) == 5_000
+    assert len(compositional_fact_special_tokens()) == 641
+    records = compositional_fact_training_texts(5_000, 29, facts)
+    assert len({record.split("<factmap>", 1)[0] for record in records}) == 5_000
+    assert all(answer not in prompt for prompt, answer in compositional_fact_eval_cases(facts))

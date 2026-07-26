@@ -14,10 +14,13 @@ from mathllm.pretraining.arithmetic_bpe_tokenizer import ArithmeticBPETokenizer
 from mathllm.pretraining.fact_benchmark import (
     atomic_fact_eval_cases,
     atomic_fact_training_texts,
+    compositional_fact_eval_cases,
+    compositional_fact_training_texts,
     fact_eval_cases,
     fact_eval_texts,
     fact_training_texts,
     make_atomic_facts,
+    make_compositional_facts,
     make_facts,
 )
 
@@ -68,6 +71,8 @@ class MixtureSpec:
     # ``atomic`` is a controlled one-token associative-recall probe; it is
     # intentionally separate from the earlier natural-language fact attempt.
     fact_format: str = "natural"
+    fact_key_vocab_size: int = 128
+    fact_value_vocab_size: int = 512
 
 
 def load_prose_documents(
@@ -239,24 +244,34 @@ def build_mixture(spec: MixtureSpec, prose_documents: list[str], tokenizer: Arit
     train_contextual = contextual_arithmetic_texts(needed_texts, spec.seed + 3, spec.max_digits)
     eval_contextual = contextual_arithmetic_texts(needed_texts, spec.seed + 4, spec.max_digits)
     block_length = spec.context_length
-    if spec.fact_format not in {"natural", "atomic"}:
-        raise ValueError("fact_format must be 'natural' or 'atomic'")
-    facts = (
-        (make_atomic_facts if spec.fact_format == "atomic" else make_facts)(spec.fact_count, spec.seed + 5)
-        if spec.fact_token_fraction else []
-    )
+    if spec.fact_format not in {"natural", "atomic", "compositional"}:
+        raise ValueError("fact_format must be 'natural', 'atomic', or 'compositional'")
+    if spec.fact_token_fraction:
+        if spec.fact_format == "compositional":
+            facts = make_compositional_facts(
+                spec.fact_count, spec.seed + 5,
+                spec.fact_key_vocab_size, spec.fact_value_vocab_size,
+            )
+        else:
+            facts = (make_atomic_facts if spec.fact_format == "atomic" else make_facts)(spec.fact_count, spec.seed + 5)
+    else:
+        facts = []
     # Atomic records contain only three opaque tokens plus a separator, so a
     # normal text count would not supply enough distinct fixed-length blocks.
     # Generate independent randomized sequences rather than cycling a tiny
     # source pool, preserving the strict unique-block protocol.
     fact_text_count = needed_texts
-    if facts and spec.fact_format == "atomic":
+    if facts and spec.fact_format in {"atomic", "compositional"}:
         fact_text_count = max(
             fact_text_count,
             max(train_fact_blocks, eval_fact_blocks) * (block_length + 1),
         )
-        train_facts = atomic_fact_training_texts(fact_text_count, spec.seed + 6, facts)
-        eval_facts = atomic_fact_training_texts(fact_text_count, spec.seed + 7, facts)
+        fact_text_builder = (
+            compositional_fact_training_texts
+            if spec.fact_format == "compositional" else atomic_fact_training_texts
+        )
+        train_facts = fact_text_builder(fact_text_count, spec.seed + 6, facts)
+        eval_facts = fact_text_builder(fact_text_count, spec.seed + 7, facts)
     else:
         train_facts = fact_training_texts(fact_text_count, spec.seed + 6, facts) if facts else []
         eval_facts = fact_eval_texts(fact_text_count, spec.seed + 7, facts) if facts else []
@@ -323,6 +338,8 @@ def build_mixture(spec: MixtureSpec, prose_documents: list[str], tokenizer: Arit
             "fact_token_fraction_target": spec.fact_token_fraction,
             "fact_count": spec.fact_count,
             "fact_format": spec.fact_format,
+            "fact_key_vocab_size": spec.fact_key_vocab_size,
+            "fact_value_vocab_size": spec.fact_value_vocab_size,
             "train_fact_blocks": train_fact_blocks,
             "eval_fact_blocks": eval_fact_blocks,
         })
@@ -341,8 +358,8 @@ def build_mixture(spec: MixtureSpec, prose_documents: list[str], tokenizer: Arit
         "eval_sources": torch.tensor([record[1] for record in eval_records], dtype=torch.long),
         "metadata": metadata,
         "fact_eval_cases": (
-            atomic_fact_eval_cases(facts)
-            if facts and spec.fact_format == "atomic"
+            (compositional_fact_eval_cases(facts) if spec.fact_format == "compositional" else atomic_fact_eval_cases(facts))
+            if facts and spec.fact_format in {"atomic", "compositional"}
             else fact_eval_cases(min(256, len(facts)), spec.seed + 8, facts)
             if facts else []
         ),

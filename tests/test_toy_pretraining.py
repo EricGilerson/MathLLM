@@ -40,6 +40,17 @@ def test_atomic_fact_tokens_are_one_token_and_never_digit_tokens():
     assert arb.compute_core.extract.token_digit_value[entity_id].item() == -1
 
 
+def test_compositional_fact_key_and_value_tokens_are_one_token():
+    key_a, key_b, value = "<factkeyaaaaa>", "<factkeyaaaab>", "<factvalueaaaaa>"
+    tokenizer = ArithmeticBPETokenizer.train(
+        [f"{key_a}{key_b}<factmap>{value}\n", "12+3=15\n"],
+        128,
+        atomic_tokens=(key_a, key_b, "<factmap>", value),
+    )
+    assert [len(tokenizer.encode(token)) for token in (key_a, key_b, value)] == [1, 1, 1]
+    assert len(tokenizer.encode(f"{key_a}{key_b}<factmap>")) == 3
+
+
 def test_mixture_has_exact_train_and_eval_block_ratios():
     tokenizer = _tokenizer()
     spec = MixtureSpec(

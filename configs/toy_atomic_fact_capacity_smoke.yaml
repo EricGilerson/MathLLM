@@ -1,0 +1,35 @@
+# Local protocol smoke test: validates atomic tokenization and next-token
+# evaluation only.  It is not a substantive capacity result.
+model:
+  n_layer: 2
+  n_embd: 64
+  n_head: 4
+  n_inner: 256
+  baseline_n_inner: 259
+
+data:
+  mixture_file: "pretraining_data/toy_atomic_fact_capacity_smoke.pt"
+  tokenizer_file: "pretraining_data/toy_atomic_fact_capacity_smoke_tokenizer.json"
+  tokenizer_vocab_size: 512
+  prose_documents: 256
+  train_blocks: 128
+  eval_blocks: 32
+  arithmetic_token_fraction: 0.30
+  direct_equation_token_fraction: 0.25
+  contextual_equation_token_fraction: 0.05
+  fact_token_fraction: 0.20
+  fact_count: 32
+  fact_format: "atomic"
+  max_digits: 2
+
+training:
+  output_dir: "pretraining_runs/toy_atomic_fact_capacity_smoke"
+  device: "auto"
+  seed: 20260731
+  context_length: 32
+  batch_size: 4
+  learning_rate: 0.0003
+  max_steps: 3
+  log_every: 1
+  eval_batches: 2
+  eval_cases: 4

@@ -21,6 +21,25 @@ def test_bpe_tokenizer_keeps_arithmetic_symbols_standalone():
     assert ids == [tokenizer.token_to_id[character] for character in "12+3="]
 
 
+def test_atomic_fact_tokens_are_one_token_and_never_digit_tokens():
+    entity = "<factentityabcde>"
+    value = "<factvaluevwxyz>"
+    tokenizer = ArithmeticBPETokenizer.train(
+        [f"{entity}<factmap>{value}\n", "35+23=58\n"],
+        128,
+        atomic_tokens=(entity, value, "<factmap>"),
+    )
+    assert len(tokenizer.encode(entity)) == 1
+    assert len(tokenizer.encode(value)) == 1
+    assert tokenizer.decode(tokenizer.encode(entity)) == entity
+    assert len(tokenizer.encode("35+23=")) == 6
+
+    config = ToyExperimentConfig()
+    arb = build_model(config, "arb", tokenizer)
+    entity_id = tokenizer.encode(entity)[0]
+    assert arb.compute_core.extract.token_digit_value[entity_id].item() == -1
+
+
 def test_mixture_has_exact_train_and_eval_block_ratios():
     tokenizer = _tokenizer()
     spec = MixtureSpec(

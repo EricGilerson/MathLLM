@@ -1,9 +1,13 @@
 from mathllm.pretraining.fact_benchmark import (
+    atomic_fact_eval_cases,
+    atomic_fact_special_tokens,
+    atomic_fact_training_texts,
     fact_eval_cases,
     fact_eval_texts,
     fact_seen_template_cases,
     fact_training_texts,
     make_facts,
+    make_atomic_facts,
 )
 
 
@@ -36,3 +40,15 @@ def test_heldout_loss_corpus_uses_all_disjoint_templates_without_duplicates():
     assert len(records) == 12
     assert len(set(records)) == len(records)
     assert all("What vocation does" not in record for record in records)
+
+
+def test_atomic_fact_protocol_has_opaque_single_target_queries():
+    facts = make_atomic_facts(64, 23)
+    assert facts == make_atomic_facts(64, 23)
+    assert all(not any(character.isdigit() for character in fact.entity + fact.value) for fact in facts)
+    assert len(atomic_fact_special_tokens(facts)) == 129
+    records = atomic_fact_training_texts(64, 29, facts)
+    assert all("<factmap>" in text for text in records)
+    assert len({record.split("<factmap>", 1)[0] for record in records}) == 64
+    cases = atomic_fact_eval_cases(facts)
+    assert all(answer not in prompt for prompt, answer in cases)

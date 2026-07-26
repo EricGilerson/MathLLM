@@ -13,7 +13,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from mathllm.pretraining.arithmetic_bpe_tokenizer import ArithmeticBPETokenizer
 from mathllm.pretraining.experiment import _fact_metrics, _generate, build_model, load_toy_config, resolve_device
-from mathllm.pretraining.fact_benchmark import fact_seen_template_cases, make_facts
+from mathllm.pretraining.fact_benchmark import (
+    atomic_fact_eval_cases,
+    fact_seen_template_cases,
+    make_atomic_facts,
+    make_facts,
+)
 
 
 def main() -> None:
@@ -32,18 +37,35 @@ def main() -> None:
     model = build_model(config, args.variant, tokenizer).to(device).eval()
     checkpoint = args.checkpoint or Path(config.training.output_dir) / args.variant / "checkpoint.pt"
     model.load_state_dict(torch.load(checkpoint, map_location=device, weights_only=False)["model_state"])
-    if args.split == "seen":
+    atomic = config.data.fact_format == "atomic"
+    if args.split == "seen" and not atomic:
         facts = make_facts(config.data.fact_count, config.training.seed + 5)
         cases = fact_seen_template_cases(256, config.training.seed + 9, facts)
+    elif atomic:
+        # The atomic probe has one canonical query format; its evaluation
+        # split already tests stored bindings with no answer in the prompt.
+        cases = atomic_fact_eval_cases(make_atomic_facts(config.data.fact_count, config.training.seed + 5))
     else:
         cases = mixture.get("fact_eval_cases", [])
-    result = _fact_metrics(model, tokenizer, cases, device)
+    result = _fact_metrics(model, tokenizer, cases, device, atomic=atomic)
     if args.show:
         examples = []
-        for prompt, expected in cases[:args.show]:
-            full = _generate(model, tokenizer, prompt, len(expected) + 8, device)
-            completion = full[len(prompt):]
-            examples.append({"prompt": prompt, "expected": expected, "completion": completion})
+        if atomic:
+            prompts, expected = zip(*cases[:args.show])
+            input_ids = torch.tensor([tokenizer.encode(prompt) for prompt in prompts], device=device)
+            with torch.inference_mode():
+                outputs = model(input_ids=input_ids, attention_mask=torch.ones_like(input_ids))
+                logits = outputs["logits"] if isinstance(outputs, dict) else outputs.logits
+                prediction = logits[:, -1, :].argmax(dim=-1).tolist()
+            examples = [
+                {"prompt": prompt, "expected": target, "predicted": tokenizer.decode([token_id])}
+                for prompt, target, token_id in zip(prompts, expected, prediction)
+            ]
+        else:
+            for prompt, expected in cases[:args.show]:
+                full = _generate(model, tokenizer, prompt, len(expected) + 8, device)
+                completion = full[len(prompt):]
+                examples.append({"prompt": prompt, "expected": expected, "completion": completion})
         result["examples"] = examples
     print(json.dumps(result, indent=2))
 

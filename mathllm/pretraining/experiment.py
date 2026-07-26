@@ -55,6 +55,7 @@ class ToyDataConfig:
     contextual_equation_token_fraction: float | None = None
     fact_token_fraction: float = 0.0
     fact_count: int = 0
+    fact_format: str = "natural"
     require_wikitext: bool = False
     require_external_prose: bool = False
     require_unique_source_blocks: bool = False
@@ -124,13 +125,30 @@ def prepare_data(config: ToyExperimentConfig) -> dict[str, object]:
         config.training.seed + 1,
         config.data.max_digits,
     )
+    atomic_tokens: list[str] = []
     if config.data.fact_token_fraction:
-        from mathllm.pretraining.fact_benchmark import fact_training_texts, make_facts
-        tokenizer_training_texts += fact_training_texts(
-            tokenizer_text_count, config.training.seed + 6,
-            make_facts(config.data.fact_count, config.training.seed + 5),
-        )
-    tokenizer = ArithmeticBPETokenizer.train(tokenizer_training_texts, config.data.tokenizer_vocab_size)
+        if config.data.fact_format == "atomic":
+            from mathllm.pretraining.fact_benchmark import (
+                atomic_fact_special_tokens,
+                atomic_fact_training_texts,
+                make_atomic_facts,
+            )
+            facts = make_atomic_facts(config.data.fact_count, config.training.seed + 5)
+            atomic_tokens = atomic_fact_special_tokens(facts)
+            tokenizer_training_texts += atomic_fact_training_texts(
+                tokenizer_text_count, config.training.seed + 6, facts,
+            )
+        else:
+            from mathllm.pretraining.fact_benchmark import fact_training_texts, make_facts
+            tokenizer_training_texts += fact_training_texts(
+                tokenizer_text_count, config.training.seed + 6,
+                make_facts(config.data.fact_count, config.training.seed + 5),
+            )
+    tokenizer = ArithmeticBPETokenizer.train(
+        tokenizer_training_texts,
+        config.data.tokenizer_vocab_size,
+        atomic_tokens=atomic_tokens,
+    )
     tokenizer.save(config.data.tokenizer_file)
     spec = MixtureSpec(
         context_length=config.training.context_length,
@@ -144,6 +162,7 @@ def prepare_data(config: ToyExperimentConfig) -> dict[str, object]:
         contextual_equation_token_fraction=config.data.contextual_equation_token_fraction,
         fact_token_fraction=config.data.fact_token_fraction,
         fact_count=config.data.fact_count,
+        fact_format=config.data.fact_format,
         prose_source=config.data.prose_source,
         prose_source_config=config.data.prose_source_config,
         require_wikitext=config.data.require_wikitext,
@@ -290,9 +309,38 @@ def _arithmetic_metrics(model: nn.Module, tokenizer: ArithmeticBPETokenizer, con
     }
 
 
-def _fact_metrics(model, tokenizer, cases, device) -> dict[str, float]:
+def _fact_metrics(model, tokenizer, cases, device, *, atomic: bool = False) -> dict[str, float]:
     if not cases:
         return {"heldout_fact_accuracy": float("nan"), "fact_eval_cases": 0}
+    if atomic:
+        # Every query ends immediately before one opaque value token.  Thus
+        # teacher-forced top-1 and one-token greedy decoding are the same
+        # decision, without free-form length or whitespace confounds.
+        prompts, expected = zip(*cases)
+        encoded = [tokenizer.encode(prompt) for prompt in prompts]
+        if len({len(ids) for ids in encoded}) != 1:
+            raise ValueError("Atomic fact prompts must have a fixed token length")
+        target_ids = torch.tensor([tokenizer.encode(value) for value in expected], device=device)
+        if target_ids.ndim != 2 or target_ids.shape[1] != 1:
+            raise ValueError("Atomic fact values must each encode to exactly one token")
+        inputs = torch.tensor(encoded, dtype=torch.long, device=device)
+        model.eval()
+        with torch.inference_mode():
+            outputs = model(input_ids=inputs, attention_mask=torch.ones_like(inputs))
+            logits = outputs["logits"] if isinstance(outputs, dict) else outputs.logits
+            answer_logits = logits[:, -1, :]
+            answer_nll = F.cross_entropy(answer_logits, target_ids[:, 0])
+            prediction = answer_logits.argmax(dim=-1)
+        correct = float((prediction == target_ids[:, 0]).float().mean().item())
+        return {
+            # Retain the existing key for paired-run summaries.  These two
+            # accuracy names are deliberately explicit about the protocol.
+            "heldout_fact_accuracy": correct,
+            "fact_teacher_forced_top1_accuracy": correct,
+            "fact_greedy_one_token_accuracy": correct,
+            "fact_answer_nll": float(answer_nll.item()),
+            "fact_eval_cases": len(cases),
+        }
     correct = 0
     for prompt, expected in cases:
         full = _generate(model, tokenizer, prompt, len(expected) + 2, device)
@@ -384,7 +432,13 @@ def run_training(config: ToyExperimentConfig, variant: str, prepare: bool = Fals
         "parameter_count": sum(parameter.numel() for parameter in model.parameters()),
         "device": str(device),
         **_arithmetic_metrics(model, tokenizer, config, device),
-        **_fact_metrics(model, tokenizer, mixture.get("fact_eval_cases", []), device),
+        **_fact_metrics(
+            model,
+            tokenizer,
+            mixture.get("fact_eval_cases", []),
+            device,
+            atomic=config.data.fact_format == "atomic",
+        ),
     }
     output_dir = Path(config.training.output_dir) / variant
     output_dir.mkdir(parents=True, exist_ok=True)

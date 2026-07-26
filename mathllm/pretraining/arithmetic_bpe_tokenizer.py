@@ -24,11 +24,26 @@ class ArithmeticBPETokenizer:
 
     def __init__(self, backend: Tokenizer):
         self.backend = backend
-        self.tokens = list(self._SPECIAL) + list(self._ARITHMETIC)
+        standard = set(self._SPECIAL) | set(self._ARITHMETIC)
+        # Fact-capacity experiments use explicit, one-token identifiers.  They
+        # must be recognized *before* the arithmetic splitter: otherwise an
+        # identifier such as ``<entity_042>`` would be fragmented at ``0``,
+        # ``4``, and ``2``.  Discover them from the serialized tokenizer so
+        # reloads preserve exactly the same contract.
+        self.atomic_tokens = tuple(
+            token.content
+            for _, token in backend.get_added_tokens_decoder().items()
+            if token.special and token.content not in standard
+        )
+        self.tokens = list(self._SPECIAL) + list(self._ARITHMETIC) + list(self.atomic_tokens)
         self.token_to_id = {
             token: self._required_id(token) for token in self.tokens
         }
         self.id_to_token = {token_id: token for token, token_id in self.token_to_id.items()}
+        self._atomic_split = (
+            re.compile("(" + "|".join(re.escape(token) for token in sorted(self.atomic_tokens, key=len, reverse=True)) + ")")
+            if self.atomic_tokens else None
+        )
         self.pad_token, self.eos_token, self.unk_token = self._SPECIAL
         self.pad_token_id = self.token_to_id[self.pad_token]
         self.eos_token_id = self.token_to_id[self.eos_token]
@@ -41,14 +56,25 @@ class ArithmeticBPETokenizer:
         return token_id
 
     @classmethod
-    def train(cls, texts: Iterable[str], vocab_size: int) -> "ArithmeticBPETokenizer":
+    def train(
+        cls,
+        texts: Iterable[str],
+        vocab_size: int,
+        atomic_tokens: Iterable[str] = (),
+    ) -> "ArithmeticBPETokenizer":
+        atomic_tokens = tuple(dict.fromkeys(atomic_tokens))
+        reserved = list(cls._SPECIAL) + list(cls._ARITHMETIC) + list(atomic_tokens)
+        if vocab_size < len(reserved):
+            raise ValueError(
+                f"vocab_size={vocab_size} cannot hold {len(reserved)} required special tokens"
+            )
         backend = Tokenizer(models.BPE(unk_token="<unk>"))
         backend.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False)
         backend.decoder = decoders.ByteLevel()
         trainer = trainers.BpeTrainer(
             vocab_size=vocab_size,
             min_frequency=2,
-            special_tokens=list(cls._SPECIAL) + list(cls._ARITHMETIC),
+            special_tokens=reserved,
         )
         backend.train_from_iterator(texts, trainer=trainer)
         return cls(backend)
@@ -68,14 +94,22 @@ class ArithmeticBPETokenizer:
 
     def encode(self, text: str, add_special_tokens: bool = False, return_tensors: str | None = None):
         ids: list[int] = []
-        for piece in self._SPLIT.split(text):
-            if not piece:
+        # Atomic identifiers are intentionally opaque to the arithmetic
+        # parser.  This protects both their one-token capacity-test semantics
+        # and ARB's digit table from accidental digits embedded in names.
+        outer_pieces = self._atomic_split.split(text) if self._atomic_split else [text]
+        for outer_piece in outer_pieces:
+            if outer_piece in self.token_to_id and outer_piece in self.atomic_tokens:
+                ids.append(self.token_to_id[outer_piece])
                 continue
-            token_id = self.token_to_id.get(piece)
-            if token_id is not None and len(piece) == 1:
-                ids.append(token_id)
-            else:
-                ids.extend(self.backend.encode(piece).ids)
+            for piece in self._SPLIT.split(outer_piece):
+                if not piece:
+                    continue
+                token_id = self.token_to_id.get(piece)
+                if token_id is not None and len(piece) == 1:
+                    ids.append(token_id)
+                else:
+                    ids.extend(self.backend.encode(piece).ids)
         if add_special_tokens:
             ids.append(self.eos_token_id)
         if return_tensors is None:
@@ -97,7 +131,7 @@ class ArithmeticBPETokenizer:
 
         for token_id in map(int, ids):
             token = self.id_to_token.get(token_id)
-            if token in self._ARITHMETIC:
+            if token in self._ARITHMETIC or token in self.atomic_tokens:
                 flush_bpe()
                 result.append(token)
             elif token in self._SPECIAL:

@@ -28,6 +28,9 @@ _SUMMARY_KEYS = (
     "contextual_unseen_arithmetic_accuracy",
     "heldout_fact_nll",
     "heldout_fact_accuracy",
+    "fact_teacher_forced_top1_accuracy",
+    "fact_greedy_one_token_accuracy",
+    "fact_answer_nll",
     "fact_eval_cases",
 )
 

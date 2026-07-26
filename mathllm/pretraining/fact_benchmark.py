@@ -32,6 +32,63 @@ class Fact:
     value: str
 
 
+def _alpha_identifier(index: int) -> str:
+    """Fixed-width alphabetic code with no digits for opaque fact tokens."""
+    alphabet = "abcdefghijklmnopqrstuvwxyz"
+    value = index
+    chars = []
+    for _ in range(5):
+        chars.append(alphabet[value % len(alphabet)])
+        value //= len(alphabet)
+    if value:
+        raise ValueError("atomic fact experiment supports at most 26**5 bindings")
+    return "".join(reversed(chars))
+
+
+def make_atomic_facts(count: int, seed: int) -> list[Fact]:
+    """Create arbitrary one-token entity/value bindings.
+
+    The spellings are deliberately alphabetic and semantically empty.  They
+    become tokenizer special tokens, rather than BPE fragments, so evaluation
+    is a single next-token classification decision.
+    """
+    if count <= 0:
+        raise ValueError("fact count must be positive")
+    rng = random.Random(seed)
+    values = [f"<factvalue{_alpha_identifier(index)}>" for index in range(count)]
+    rng.shuffle(values)
+    return [
+        Fact(entity=f"<factentity{_alpha_identifier(index)}>", value=values[index])
+        for index in range(count)
+    ]
+
+
+def atomic_fact_special_tokens(facts: list[Fact]) -> list[str]:
+    """All opaque symbols needed by the atomic retrieval protocol."""
+    return ["<factmap>"] + [fact.entity for fact in facts] + [fact.value for fact in facts]
+
+
+def atomic_fact_training_texts(count: int, seed: int, facts: list[Fact]) -> list[str]:
+    """Shuffled association passes, packed later into fixed-length blocks.
+
+    A fact appears once per full pass through the mapping.  With normal block
+    sizes this prevents an answer position from seeing a duplicate of its own
+    binding earlier in the same context window, ruling out a local copy route.
+    """
+    rng = random.Random(seed)
+    texts = []
+    while len(texts) < count:
+        order = list(facts)
+        rng.shuffle(order)
+        texts.extend(f"{fact.entity}<factmap>{fact.value}\n" for fact in order)
+    return texts[:count]
+
+
+def atomic_fact_eval_cases(facts: list[Fact]) -> list[tuple[str, str]]:
+    """One next-token query per stored binding; no answer appears in its prompt."""
+    return [(f"{fact.entity}<factmap>", fact.value) for fact in facts]
+
+
 def _word(index: int, prefix: str) -> str:
     """Injective, pronounceable synthetic identifier; no semantic prior."""
     base = len(_ONSETS) * len(_VOWELS) * len(_CODAS)

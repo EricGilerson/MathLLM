@@ -11,7 +11,15 @@ from pathlib import Path
 import torch
 
 from mathllm.pretraining.arithmetic_bpe_tokenizer import ArithmeticBPETokenizer
-from mathllm.pretraining.fact_benchmark import fact_eval_cases, fact_eval_texts, fact_training_texts, make_facts
+from mathllm.pretraining.fact_benchmark import (
+    atomic_fact_eval_cases,
+    atomic_fact_training_texts,
+    fact_eval_cases,
+    fact_eval_texts,
+    fact_training_texts,
+    make_atomic_facts,
+    make_facts,
+)
 
 
 # Varied instruction forms, with an explicit calculation boundary in every
@@ -57,6 +65,9 @@ class MixtureSpec:
     contextual_equation_token_fraction: float | None = None
     fact_token_fraction: float = 0.0
     fact_count: int = 0
+    # ``atomic`` is a controlled one-token associative-recall probe; it is
+    # intentionally separate from the earlier natural-language fact attempt.
+    fact_format: str = "natural"
 
 
 def load_prose_documents(
@@ -227,10 +238,28 @@ def build_mixture(spec: MixtureSpec, prose_documents: list[str], tokenizer: Arit
     eval_arithmetic = arithmetic_texts(needed_texts, spec.seed + 2, spec.max_digits, spec.invocation_fraction)
     train_contextual = contextual_arithmetic_texts(needed_texts, spec.seed + 3, spec.max_digits)
     eval_contextual = contextual_arithmetic_texts(needed_texts, spec.seed + 4, spec.max_digits)
-    facts = make_facts(spec.fact_count, spec.seed + 5) if spec.fact_token_fraction else []
-    train_facts = fact_training_texts(needed_texts, spec.seed + 6, facts) if facts else []
-    eval_facts = fact_eval_texts(needed_texts, spec.seed + 7, facts) if facts else []
     block_length = spec.context_length
+    if spec.fact_format not in {"natural", "atomic"}:
+        raise ValueError("fact_format must be 'natural' or 'atomic'")
+    facts = (
+        (make_atomic_facts if spec.fact_format == "atomic" else make_facts)(spec.fact_count, spec.seed + 5)
+        if spec.fact_token_fraction else []
+    )
+    # Atomic records contain only three opaque tokens plus a separator, so a
+    # normal text count would not supply enough distinct fixed-length blocks.
+    # Generate independent randomized sequences rather than cycling a tiny
+    # source pool, preserving the strict unique-block protocol.
+    fact_text_count = needed_texts
+    if facts and spec.fact_format == "atomic":
+        fact_text_count = max(
+            fact_text_count,
+            max(train_fact_blocks, eval_fact_blocks) * (block_length + 1),
+        )
+        train_facts = atomic_fact_training_texts(fact_text_count, spec.seed + 6, facts)
+        eval_facts = atomic_fact_training_texts(fact_text_count, spec.seed + 7, facts)
+    else:
+        train_facts = fact_training_texts(fact_text_count, spec.seed + 6, facts) if facts else []
+        eval_facts = fact_eval_texts(fact_text_count, spec.seed + 7, facts) if facts else []
     train_prose_pool = _blocks_from_texts(train_prose, tokenizer, block_length)
     eval_prose_pool = _blocks_from_texts(eval_prose, tokenizer, block_length)
     train_arithmetic_pool = _blocks_from_texts(train_arithmetic, tokenizer, block_length)
@@ -293,6 +322,7 @@ def build_mixture(spec: MixtureSpec, prose_documents: list[str], tokenizer: Arit
             "eval_contextual_equation_blocks": eval_contextual_blocks,
             "fact_token_fraction_target": spec.fact_token_fraction,
             "fact_count": spec.fact_count,
+            "fact_format": spec.fact_format,
             "train_fact_blocks": train_fact_blocks,
             "eval_fact_blocks": eval_fact_blocks,
         })
@@ -310,7 +340,12 @@ def build_mixture(spec: MixtureSpec, prose_documents: list[str], tokenizer: Arit
         "eval_input_ids": torch.tensor([record[0] for record in eval_records], dtype=torch.long),
         "eval_sources": torch.tensor([record[1] for record in eval_records], dtype=torch.long),
         "metadata": metadata,
-        "fact_eval_cases": fact_eval_cases(min(256, len(facts)), spec.seed + 8, facts) if facts else [],
+        "fact_eval_cases": (
+            atomic_fact_eval_cases(facts)
+            if facts and spec.fact_format == "atomic"
+            else fact_eval_cases(min(256, len(facts)), spec.seed + 8, facts)
+            if facts else []
+        ),
     }
 
 

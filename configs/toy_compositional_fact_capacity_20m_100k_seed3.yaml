@@ -1,0 +1,40 @@
+# Replication seed 3. Reuse seed 1's mixture/tokenizer; run with --skip-prepare.
+model:
+  n_layer: 6
+  n_embd: 512
+  n_head: 8
+  n_inner: 2048
+  baseline_n_inner: 2060
+data:
+  mixture_file: "pretraining_data/toy_compositional_fact_capacity_20m_100k.pt"
+  tokenizer_file: "pretraining_data/toy_compositional_fact_capacity_20m_100k_tokenizer.json"
+  tokenizer_vocab_size: 2048
+  prose_documents: 50000
+  prose_source: "fineweb_edu"
+  prose_source_config: "sample-10BT"
+  train_blocks: 200000
+  eval_blocks: 1000
+  arithmetic_token_fraction: 0.30
+  direct_equation_token_fraction: 0.25
+  contextual_equation_token_fraction: 0.05
+  fact_token_fraction: 0.20
+  fact_count: 100000
+  fact_format: "compositional"
+  fact_key_vocab_size: 512
+  fact_value_vocab_size: 512
+  max_digits: 3
+  require_external_prose: true
+  require_unique_source_blocks: true
+training:
+  output_dir: "pretraining_runs/toy_compositional_fact_capacity_20m_100k_seed20260806"
+  device: "auto"
+  seed: 20260804
+  model_seed: 20260806
+  context_length: 128
+  batch_size: 32
+  learning_rate: 0.0003
+  weight_decay: 0.01
+  max_steps: 25000
+  log_every: 25
+  eval_batches: 32
+  eval_cases: 100

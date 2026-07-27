@@ -40,18 +40,15 @@ def main() -> None:
     mixture = torch.load(config.data.mixture_file, map_location="cpu", weights_only=False)
     tokenizer = ArithmeticBPETokenizer.from_file(config.data.tokenizer_file)
     atomic = config.data.fact_format in {"atomic", "compositional"}
-    if args.split == "seen" and not atomic:
+    if atomic:
+        # Replication configs reuse seed 1's prepared mixture while changing
+        # only model/training-order seed.  These saved cases are therefore the
+        # source of truth; regenerating from config.training.seed would test a
+        # different binding map for seeds 2 and 3.
+        cases = mixture.get("fact_eval_cases", [])
+    elif args.split == "seen":
         facts = make_facts(config.data.fact_count, config.training.seed + 5)
         cases = fact_seen_template_cases(256, config.training.seed + 9, facts)
-    elif config.data.fact_format == "compositional":
-        cases = compositional_fact_eval_cases(make_compositional_facts(
-            config.data.fact_count, config.training.seed + 5,
-            config.data.fact_key_vocab_size, config.data.fact_value_vocab_size,
-        ))
-    elif atomic:
-        # The atomic probe has one canonical query format; its evaluation
-        # split already tests stored bindings with no answer in the prompt.
-        cases = atomic_fact_eval_cases(make_atomic_facts(config.data.fact_count, config.training.seed + 5))
     else:
         cases = mixture.get("fact_eval_cases", [])
     variants = ("baseline", "arb") if args.variant == "both" else (args.variant,)

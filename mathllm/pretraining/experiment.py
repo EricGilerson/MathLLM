@@ -70,6 +70,10 @@ class ToyTrainingConfig:
     output_dir: str = "pretraining_runs/toy_smoke"
     device: str = "cpu"
     seed: int = 20260723
+    # Optional initialization-only replication seed.  When set, the prepared
+    # data, minibatch order, dropout stream, and generated evaluation cases
+    # continue to use ``seed``; only model weight initialization changes.
+    model_seed: int | None = None
     context_length: int = 64
     batch_size: int = 4
     learning_rate: float = 3e-4
@@ -219,7 +223,9 @@ def _gpt2_config(
 
 
 def build_model(config: ToyExperimentConfig, variant: str, tokenizer: ArithmeticBPETokenizer) -> nn.Module:
-    torch.manual_seed(config.training.seed)
+    torch.manual_seed(
+        config.training.seed if config.training.model_seed is None else config.training.model_seed
+    )
     baseline_n_inner = config.model.baseline_n_inner or config.model.n_inner
     base = GPT2LMHeadModel(
         _gpt2_config(
@@ -399,6 +405,11 @@ def run_training(config: ToyExperimentConfig, variant: str, prepare: bool = Fals
     tokenizer = ArithmeticBPETokenizer.from_file(config.data.tokenizer_file)
     device = resolve_device(config.training.device)
     model = build_model(config, variant, tokenizer).to(device)
+    # After initialization, restore the shared training RNG.  Replication
+    # configs can therefore isolate initialization without also changing data
+    # order or stochastic training/evaluation behavior.
+    torch.manual_seed(config.training.seed)
+    random.seed(config.training.seed)
     optimizer = torch.optim.AdamW(model.parameters(), lr=config.training.learning_rate, weight_decay=config.training.weight_decay)
     sequences = mixture["train_input_ids"]
     eval_ids = mixture["eval_input_ids"]

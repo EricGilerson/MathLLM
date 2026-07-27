@@ -1,0 +1,39 @@
+# Fast causal test of the parameter-reallocation hypothesis.
+# The four conditions share one dataset, tokenizer, fact order, arithmetic
+# order, optimizer, and initialization seed. Only fact values and arithmetic
+# answer digits receive loss. This is a mechanistic capacity experiment, not a
+# natural-language pretraining result.
+model:
+  n_layer: 4
+  n_embd: 320
+  n_head: 4
+  n_inner: 1280
+  baseline_n_inner: 1298
+
+data:
+  dataset_file: "pretraining_data/capacity_displacement_5m_10k.pt"
+  tokenizer_file: "pretraining_data/capacity_displacement_5m_10k_tokenizer.json"
+  tokenizer_vocab_size: 2048
+  fact_count: 25000
+  fact_key_vocab_size: 512
+  fact_value_vocab_size: 512
+  max_digits: 3
+  arithmetic_pool_size: 50000
+  arithmetic_eval_cases: 1000
+
+training:
+  output_dir: "pretraining_runs/capacity_displacement_5m_10k_seed20260820"
+  device: "auto"
+  seed: 20260820
+  model_seed: 20260820
+  context_length: 16
+  batch_size: 256
+  max_steps: 10000
+  learning_rate: 0.0003
+  weight_decay: 0.01
+  fact_loss_weight: 0.5
+  arithmetic_loss_weight: 0.5
+  log_every: 25
+  eval_every: 1000
+  curve_eval_cases: 4096
+  save_checkpoints: true

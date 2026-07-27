@@ -71,7 +71,10 @@ def main() -> None:
     config = load_toy_config(args.config)
     device = resolve_device(args.device)
     tokenizer = ArithmeticBPETokenizer.from_file(config.data.tokenizer_file)
-    cases = _cases(config)
+    # Replication configs share seed 1's mixture while changing training seed.
+    # Saved cases prevent accidental evaluation on a regenerated mapping.
+    mixture = torch.load(config.data.mixture_file, map_location="cpu", weights_only=False)
+    cases = mixture.get("fact_eval_cases") or _cases(config)
     baseline = _predictions(config, tokenizer, "baseline", cases, device, args.batch_size)
     arb = _predictions(config, tokenizer, "arb", cases, device, args.batch_size)
     both_correct = int((baseline & arb).sum())

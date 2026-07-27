@@ -1,0 +1,41 @@
+# Replication seed 4 for the selected staged capacity-pressure condition.
+# Data, tokenizer, schedules, dropout RNG, and optimization are identical to
+# the prior runs; the only training-affecting change is model initialization.
+model:
+  n_layer: 2
+  n_embd: 96
+  n_head: 4
+  n_inner: 384
+  baseline_n_inner: 423
+
+data:
+  dataset_file: "pretraining_data/staged_reallocation_437k_40k_30k.pt"
+  tokenizer_file: "pretraining_data/staged_reallocation_437k_40k_30k_tokenizer.json"
+  tokenizer_vocab_size: 2048
+  fact_count: 40000
+  fact_key_vocab_size: 512
+  fact_value_vocab_size: 512
+  max_digits: 2
+  arithmetic_pool_size: 25000
+  arithmetic_eval_cases: 4000
+
+training:
+  output_dir: "pretraining_runs/staged_reallocation_437k_40k_30k_seed20260833"
+  device: "auto"
+  seed: 20260830
+  model_seed: 20260833
+  context_length: 16
+  batch_size: 512
+  fact_batch_fraction: 0.75
+  max_steps: 30000
+  arithmetic_pretrain_steps: 8000
+  arithmetic_pretrain_eval_every: 4000
+  reset_optimizer_after_arithmetic_pretrain: true
+  learning_rate: 0.0003
+  weight_decay: 0.01
+  fact_loss_weight: 0.75
+  arithmetic_loss_weight: 0.25
+  log_every: 25
+  eval_every: 5000
+  curve_eval_cases: 4096
+  save_checkpoints: true

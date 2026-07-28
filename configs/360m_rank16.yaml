@@ -1,4 +1,4 @@
-# CUDA-ready rank-2 LoRA ablation. Matches configs/360m.yaml except for
+# CUDA-ready rank-16 LoRA ablation. Matches configs/360m.yaml except for
 # LoRA capacity, scale, and isolated output paths.
 rns:
   primes: [7, 11, 13, 17, 19, 23]
@@ -19,8 +19,8 @@ arb:
   injection_mlp_hidden: 128
   injection_attn_dim: 8
   injection_hard_select: true
-  lora_rank: 2
-  lora_alpha: 2.0  # keep alpha/rank = 1, matching the rank-32 run
+  lora_rank: 16
+  lora_alpha: 16.0  # keep alpha/rank = 1, matching the rank-32 run
 
 data:
   num_positive: 250000
@@ -46,8 +46,8 @@ training:
   grad_clip: 1.0
   log_every: 10
   eval_every: 0
-  checkpoint_dir: "checkpoints_360m_rank2/"
-  final_model_dir: "trained_model_360m_rank2/"
+  checkpoint_dir: "checkpoints_360m_rank16/"
+  final_model_dir: "trained_model_360m_rank16/"
   auto_resume_latest: false
   device: "cuda"
   answer_only_loss: true

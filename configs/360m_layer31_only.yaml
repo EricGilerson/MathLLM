@@ -53,6 +53,7 @@ training:
   answer_only_loss: true
   early_stopping_patience: 50
   max_eval_batches: 20
+  eval_batch_size: 64
   phase1_epochs: 0
   phase2_epochs: 20
   phase3_epochs: 80

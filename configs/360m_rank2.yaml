@@ -51,7 +51,9 @@ training:
   auto_resume_latest: false
   device: "cuda"
   answer_only_loss: true
-  early_stopping_patience: 50
+  # Match the completed rank-16 ablation: stop after 10 consecutive
+  # non-improving validation epochs rather than spending the full 50-epoch tail.
+  early_stopping_patience: 10
   max_eval_batches: 20
   eval_batch_size: 64
   phase1_epochs: 0
